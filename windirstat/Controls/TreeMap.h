@@ -135,6 +135,7 @@ public:
     {
         STYLE style;         // Squarification method
         bool grid;           // Whether to draw grid lines
+        bool showHeaders;    // Whether to draw headers for folders
         COLORREF gridColor;  // Color of grid lines
         double brightness;   // 0..1.0   (default = 0.84)
         double height;       // >= 0.0    (default = 0.40)    Factor "H"
@@ -142,6 +143,7 @@ public:
         double ambientLight; // 0..1.0   (default = 0.15)    Factor "Ia"
         double lightSourceX; // -4.0..+4.0 (default = -1.0), negative = left
         double lightSourceY; // -4.0..+4.0 (default = -1.0), negative = top
+        double gridMinimumSize; // >= 0.0 (default = 0.0), minimum size in pixels for grid border rendering
 
         constexpr int GetBrightnessPercent() const { return RoundDouble(brightness * 100); }
         constexpr int GetHeightPercent() const { return RoundDouble(height * 100); }
@@ -149,6 +151,7 @@ public:
         constexpr int GetAmbientLightPercent() const { return RoundDouble(ambientLight * 100); }
         constexpr int GetLightSourceXPercent() const { return RoundDouble(lightSourceX * 100); }
         constexpr int GetLightSourceYPercent() const { return RoundDouble(lightSourceY * 100); }
+        constexpr int GetGridMinimumSize() const { return RoundDouble(gridMinimumSize); }
         CPoint GetLightSourcePoint() const { return { GetLightSourceXPercent(), GetLightSourceYPercent() }; }
 
         constexpr void SetBrightnessPercent(int n) { brightness = n / 100.0; }
@@ -157,6 +160,7 @@ public:
         constexpr void SetAmbientLightPercent(int n) { ambientLight = n / 100.0; }
         constexpr void SetLightSourceXPercent(int n) { lightSourceX = n / 100.0; }
         constexpr void SetLightSourceYPercent(int n) { lightSourceY = n / 100.0; }
+        constexpr void SetGridMinimumSize(int n) { gridMinimumSize = n; }
         void SetLightSourcePoint(CPoint pt) { SetLightSourceXPercent(pt.x); SetLightSourceYPercent(pt.y); }
 
         static constexpr int RoundDouble(double d) { return static_cast<int>(d + (d < 0.0 ? -0.5 : 0.5)); }
@@ -192,15 +196,21 @@ public:
 
 protected:
 
+    // Helper structures for header rendering
+    struct FolderHeader
+    {
+        CRect rc;
+        std::wstring name;
+        COLORREF color;
+        bool isHeaderBar;
+    };
+
     // KDirStat-like squarification
     bool KDirStat_ArrangeChildren(const CItem* parent, std::vector<double>& childWidth, std::vector<double>& rows, std::vector<int>& childrenPerRow) const;
     double KDirStat_CalculateNextRow(const CItem* parent, int nextChild, double width, int& childrenUsed, std::vector<double>& childWidth) const;
 
     // Returns true, if height and scaleFactor are > 0 and ambientLight is < 1.0
     bool IsCushionShading() const;
-
-    // Leaves space for grid and then calls RenderRectangle()
-    void RenderLeaf(std::vector<COLORREF>& bitmap, const CItem* item, const std::array<double, 4>& surface) const;
 
     // Either calls DrawCushion() or DrawSolidRect()
     void RenderRectangle(std::vector<COLORREF>& bitmap, const CRect& rc, const std::array<double, 4>& surface, DWORD color) const;
@@ -211,20 +221,29 @@ protected:
     // Draws the surface using FillSolidRect()
     void DrawSolidRect(std::vector<COLORREF>& bitmap, const CRect& rc, COLORREF col, double brightness) const;
 
+    // Draws an L-shape (bottom + right edges only) directly in the bitmap
+    // This matches the original GDI behavior where top/left are covered by neighboring items
+    void DrawLShape(std::vector<COLORREF>& bitmap, const CRect& rc, COLORREF color) const;
+
     // Adds a new ridge to surface
     static void AddRidge(const CRect& rc, std::array<double, 4>& surface, double h);
+
+    // File tree colors (depth-based coloring for folders)
+    static std::array<COLORREF, 8> GetFileTreeColors();
 
     // Default tree map options
     static constexpr Options DefaultOptions = {
         .style = KDirStatStyle,
         .grid = false,
+        .showHeaders = false,
         .gridColor = RGB(0, 0, 0),
         .brightness = 0.88,
         .height = 0.38,
         .scaleFactor = 0.91,
         .ambientLight = 0.13,
         .lightSourceX = -1.0,
-        .lightSourceY = -1.0
+        .lightSourceY = -1.0,
+        .gridMinimumSize = 0.0
     };
 
     // Standard palette for WinDirStat

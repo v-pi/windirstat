@@ -46,6 +46,20 @@ CTreeMap::Options CTreeMap::GetDefaults()
     return DefaultOptions;
 }
 
+std::array<COLORREF, 8> CTreeMap::GetFileTreeColors()
+{
+    return {
+        COptions::FileTreeColor0.Obj(),
+        COptions::FileTreeColor1.Obj(),
+        COptions::FileTreeColor2.Obj(),
+        COptions::FileTreeColor3.Obj(),
+        COptions::FileTreeColor4.Obj(),
+        COptions::FileTreeColor5.Obj(),
+        COptions::FileTreeColor6.Obj(),
+        COptions::FileTreeColor7.Obj()
+    };
+}
+
 CTreeMap::CTreeMap()
 {
     SetOptions(&DefaultOptions);
@@ -161,10 +175,19 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
         CItem* item = nullptr;
         double h = 0.0;
         bool asroot = false;
+        int depth = 0;
+        std::shared_ptr<bool> gridUnlocked;
+        bool atRightEdge = false;
+        bool atBottomEdge = false;
 
         DrawState(CItem* item_, const CRect rc_, const bool asroot_,
-            const std::array<double, 4>& surface_, const double h_)
-            : surface(surface_), rc(rc_), item(item_), h(h_), asroot(asroot_) {}
+            const std::array<double, 4>& surface_, const double h_, int depth_,
+            std::shared_ptr<bool> gridUnlocked_,
+            bool atRightEdge_ = false, bool atBottomEdge_ = false)
+            : surface(surface_), rc(rc_), item(item_), h(h_), asroot(asroot_),
+            depth(depth_), gridUnlocked(std::move(gridUnlocked_)),
+            atRightEdge(atRightEdge_), atBottomEdge(atBottomEdge_) {
+        }
     };
 
     // Defined at top level to prevent reallocation
@@ -172,36 +195,121 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
     std::vector<double> rows;
     std::vector<int> childrenPerRow;
 
-    // Main loop
-    const int gridWidth = m_options.grid ? 1 : 0;
+    std::vector<FolderHeader> headersToDraw;
+
     std::vector<DrawState> stack;
     stack.emplace_back(root, CRect(0, 0, rc.Width(), rc.Height()), true,
-        std::array<double, 4>{}, m_options.height);
+        std::array<double, 4>{}, m_options.height, 0, nullptr, true, true);
+
+    const auto fileTreeColors = GetFileTreeColors();
+    const int dpiY = pdc->GetDeviceCaps(LOGPIXELSY);
+    const int headerHeight = MulDiv(18, dpiY, 96);
+
+    // Main loop
     while (!stack.empty())
     {
-        DrawState state = stack.back();
+        DrawState state = std::move(stack.back());
         stack.pop_back();
         CItem* item = state.item;
 
-        // Process the current state
-        item->TmiSetRectangle(state.rc);
-
-        if (state.rc.Width() <= gridWidth || state.rc.Height() <= gridWidth)
+        if (state.rc.Width() <= 0 || state.rc.Height() <= 0)
         {
-            continue;
+            item->TmiSetRectangle(CRect(-1, -1, -1, -1));
+            for (const int i : std::views::iota(0, item->TmiGetChildCount()))
+            {
+                item->TmiGetChild(i)->TmiSetRectangle(CRect(-1, -1, -1, -1));
+            }
+            continue; // Skip to the next item without processing children
         }
 
-        if (IsCushionShading() && (!state.asroot))
+        item->TmiSetRectangle(state.rc);
+
+        // Calculate cushion shading geometry only when cushion shading is active
+        // and the item is not the root (asroot items don't render themselves,
+        // they only pass the surface down to children).
+        // This modifies state.surface, which is then passed to children.
+        if (IsCushionShading() && !state.asroot)
         {
             AddRidge(state.rc, state.surface, state.h);
         }
 
+        COLORREF currentColor;
+        if (item->TmiIsLeaf())
+            currentColor = item->TmiGetGraphColor();
+        else
+            currentColor = state.depth == 0 ? DarkMode::WdsSysColor(COLOR_3DFACE) : fileTreeColors[(state.depth - 1) % 8];
+
+        int minDim = std::min<int>(state.rc.Width(), state.rc.Height());
+        int borderThickness = 3;
+        bool hasHeader = m_options.showHeaders
+            && state.rc.Height() > (headerHeight * 2) + borderThickness
+            && state.rc.Width() > borderThickness * 2 + 10;
+        bool applyGridToSelf = m_options.grid && (hasHeader
+            || (state.gridUnlocked && *state.gridUnlocked)
+            || minDim > m_options.gridMinimumSize);
+
+        if (applyGridToSelf && state.gridUnlocked && !*state.gridUnlocked)
+            *state.gridUnlocked = true;
+
+        CRect drawRc = state.rc;
+
+        if (applyGridToSelf)
+        {
+            if (!state.atRightEdge)  drawRc.right--;
+            if (!state.atBottomEdge) drawRc.bottom--;
+        }
+
         if (item->TmiIsLeaf())
         {
-            // Leaf node, render it
-            RenderLeaf(bitmapBits, item, state.surface);
+            if (drawRc.Width() > 0 && drawRc.Height() > 0)
+            {
+                RenderRectangle(bitmapBits, drawRc, state.surface, item->TmiGetGraphColor());
+            }
+
+            if (drawRc.Width() > 60 && drawRc.Height() > 20)
+                headersToDraw.push_back({ drawRc, item->GetName(), currentColor, false });
             continue;
         }
+
+
+        if (hasHeader)
+        {
+            CRect headerRc(drawRc.left, drawRc.top, drawRc.right, drawRc.top + headerHeight);
+            if (headerRc.Width() > 0 && headerRc.Height() > 0)
+                DrawSolidRect(bitmapBits, headerRc, currentColor, PALETTE_BRIGHTNESS);
+
+            headersToDraw.push_back({ headerRc, item->GetName(), currentColor, true });
+
+            CRect leftRc(drawRc.left, drawRc.top + headerHeight, drawRc.left + borderThickness, drawRc.bottom);
+            if (leftRc.Width() > 0 && leftRc.Height() > 0)
+                DrawSolidRect(bitmapBits, leftRc, currentColor, PALETTE_BRIGHTNESS);
+
+            CRect rightRc(drawRc.right - borderThickness, drawRc.top + headerHeight, drawRc.right, drawRc.bottom);
+            if (rightRc.Width() > 0 && rightRc.Height() > 0)
+                DrawSolidRect(bitmapBits, rightRc, currentColor, PALETTE_BRIGHTNESS);
+
+            CRect bottomRc(drawRc.left + borderThickness, drawRc.bottom - borderThickness, drawRc.right - borderThickness, drawRc.bottom);
+            if (bottomRc.Width() > 0 && bottomRc.Height() > 0)
+                DrawSolidRect(bitmapBits, bottomRc, currentColor, PALETTE_BRIGHTNESS);
+
+            state.rc.left = drawRc.left + borderThickness;
+            state.rc.top = drawRc.top + headerHeight;
+            state.rc.right = drawRc.right - borderThickness;
+            state.rc.bottom = drawRc.bottom - borderThickness;
+
+            if (m_options.grid) {
+                state.rc.top++;
+                state.rc.left++;
+                state.rc.right--;
+                state.rc.bottom--;
+            }
+        }
+        else
+        {
+            state.rc = drawRc;
+        }
+        if (state.rc.Width() <= 0 || state.rc.Height() <= 0)
+            continue;
 
         if (m_options.style == KDirStatStyle) [[msvc::flatten]]
         {
@@ -229,6 +337,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
                     bottom = horizontalRows ? state.rc.bottom : state.rc.right;
                 }
                 double left = horizontalRows ? state.rc.left : state.rc.top;
+                auto siblingsGridUnlocked = std::make_shared<bool>(false);
                 for (int i = 0; i < childrenPerRow[row]; i++, c++)
                 {
                     CItem* child = item->TmiGetChild(static_cast<int>(c));
@@ -262,7 +371,9 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
 
                     // Prepare child state and push onto the stack
                     stack.emplace_back(child, rcChild, false, state.surface,
-                        state.h * m_options.scaleFactor);
+                        state.h * m_options.scaleFactor, state.depth + 1, siblingsGridUnlocked,
+                        rcChild.right >= state.rc.right,
+                        rcChild.bottom >= state.rc.bottom);
 
                     left = fRight;
                 }
@@ -343,6 +454,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
 
                 // Distribute the children in the row
                 double fBegin = horizontal ? rcRow.top : rcRow.left;
+                auto siblingsGridUnlocked = std::make_shared<bool>(false);
 
                 for (const int i : std::views::iota(rowBegin, rowEnd))
                 {
@@ -378,7 +490,10 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
                     // Prepare child state and push onto the stack
                     if (childSize > 0)
                     {
-                        stack.emplace_back(item->TmiGetChild(i), rcChild, false, state.surface, state.h * m_options.scaleFactor);
+                        stack.emplace_back(item->TmiGetChild(i), rcChild, false, state.surface,
+                            state.h * m_options.scaleFactor, state.depth + 1, siblingsGridUnlocked,
+                            rcChild.right >= state.rc.right,
+                            rcChild.bottom >= state.rc.bottom);
                     }
 
                     fBegin = fEnd;
@@ -415,6 +530,38 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
         CSelectObject sobmp(&dcTreeView, &bmp);
         pdc->BitBlt(rc.TopLeft().x, rc.TopLeft().y, rc.Width(), rc.Height(), &dcTreeView, 0, 0, SRCCOPY);
     }
+
+    pdc->SetBkMode(TRANSPARENT);
+    CFont font;
+    // Use system GUI font for better compatibility across Windows versions
+    LOGFONT logfont = {};
+    SystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(logfont), &logfont, 0);
+    font.CreateFontIndirect(&logfont);
+    CSelectObject sofont(pdc, &font);
+    CPoint offset = rc.TopLeft();
+
+    // Render text labels (only in flat mode, not when cushion shading is enabled)
+    // Text is shown for headers and large items when cushion shading is disabled.
+    bool isCushion = IsCushionShading();
+
+    for (auto& h : headersToDraw) {
+        // Skip text rendering for file bodies when cushion shading is active.
+        // Only header bars will show text.
+        if (isCushion && !h.isHeaderBar) {
+            continue;
+        }
+
+        // Determine text color based on background brightness
+        const double brightness = CColorSpace::GetColorBrightness(h.color);
+        const COLORREF textColor = brightness > 0.5 ? RGB(0, 0, 0) : RGB(255, 255, 255);
+        pdc->SetTextColor(textColor);
+        CRect textRc = h.rc;
+        textRc.OffsetRect(offset);
+        textRc.DeflateRect(4, 1);
+
+        pdc->DrawText(h.name.c_str(), (int)h.name.length(), &textRc,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
 }
 
 CItem* CTreeMap::FindItemByPoint(CItem* item, const CPoint point)
@@ -429,53 +576,45 @@ CItem* CTreeMap::FindItemByPoint(CItem* item, const CPoint point)
 
     ASSERT(rc.PtInRect(point));
 
-    CItem* ret = nullptr;
-
     const int gridWidth = m_options.grid ? 1 : 0;
 
-    if (rc.Width() <= gridWidth ||
-        rc.Height() <= gridWidth ||
-        item->TmiIsLeaf())
+    const bool isAggregated = !item->TmiIsLeaf()
+        && item->TmiGetChildCount() > 0
+        && item->TmiGetChild(0)->TmiGetRectangle().left == -1;
+
+    if (rc.Width() <= gridWidth || rc.Height() <= gridWidth
+        || item->TmiIsLeaf() || isAggregated)
     {
-        ret = item;
+        return item;
     }
-    else
+
+    ASSERT(item->TmiGetSize() > 0);
+    ASSERT(item->TmiGetChildCount() > 0);
+
+    CItem* ret = nullptr;
+    for (const int i : std::views::iota(0, item->TmiGetChildCount()))
     {
-        ASSERT(item->TmiGetSize() > 0);
-        ASSERT(item->TmiGetChildCount() > 0);
+        CItem* child = item->TmiGetChild(i);
+        const CRect& rcChild = child->TmiGetRectangle();
 
-        for (const int i : std::views::iota(0, item->TmiGetChildCount()))
-        {
-            CItem* child = item->TmiGetChild(i);
-
-            ASSERT(child->TmiGetSize() > 0);
+        if (rcChild.left == -1 || !rcChild.PtInRect(point))
+            continue;
 
 #ifdef _DEBUG
-            const CRect rcChild(child->TmiGetRectangle());
-            ASSERT(rcChild.right >= rcChild.left);
-            ASSERT(rcChild.bottom >= rcChild.top);
-            ASSERT(rcChild.left >= rc.left);
-            ASSERT(rcChild.right <= rc.right);
-            ASSERT(rcChild.top >= rc.top);
-            ASSERT(rcChild.bottom <= rc.bottom);
+        // Only assert coordinate invariants for children that were actually rendered.
+        ASSERT(rcChild.right >= rcChild.left);
+        ASSERT(rcChild.bottom >= rcChild.top);
+        ASSERT(rcChild.left >= rc.left);
+        ASSERT(rcChild.right <= rc.right);
+        ASSERT(rcChild.top >= rc.top);
+        ASSERT(rcChild.bottom <= rc.bottom);
 #endif
-            if (child->TmiGetRectangle().PtInRect(point))
-            {
-                ret = FindItemByPoint(child, point);
-                ASSERT(ret != nullptr);
-                break;
-            }
-        }
+
+        ret = FindItemByPoint(child, point);
+        if (ret) break;
     }
 
-    ASSERT(ret != nullptr);
-
-    if (ret == nullptr)
-    {
-        ret = item;
-    }
-
-    return ret;
+    return ret ? ret : item;
 }
 
 void CTreeMap::DrawColorPreview(CDC* pdc, const CRect& rc, const COLORREF color, const Options* options)
@@ -520,23 +659,6 @@ void CTreeMap::DrawColorPreview(CDC* pdc, const CRect& rc, const COLORREF color,
         CSelectStockObject sobrush(pdc, NULL_BRUSH);
         pdc->Rectangle(rc);
     }
-}
-
-void CTreeMap::RenderLeaf(std::vector<COLORREF>& bitmap, const CItem* item, const std::array<double, 4>& surface) const
-{
-    CRect rc = item->TmiGetRectangle();
-
-    if (m_options.grid)
-    {
-        rc.top++;
-        rc.left++;
-        if (rc.Width() <= 0 || rc.Height() <= 0)
-        {
-            return;
-        }
-    }
-
-    RenderRectangle(bitmap, rc, surface, item->TmiGetGraphColor());
 }
 
 void CTreeMap::RenderRectangle(std::vector<COLORREF>& bitmap, const CRect& rc, const std::array<double, 4>& surface, DWORD color) const
@@ -763,6 +885,17 @@ void CTreeMap::DrawCushion(std::vector<COLORREF>& bitmap, const CRect& rc, const
         // ... and set!
         bitmap[ix + iy * m_renderArea.Width()] = BGR(blue, green, red);
     }
+}
+
+void CTreeMap::DrawLShape(std::vector<COLORREF>& bitmap, const CRect& rc, COLORREF color) const
+{
+    // Bottom edge
+    for (int x = rc.left; x < rc.right; x++)
+        bitmap[(rc.bottom - 1) * m_renderArea.Width() + x] = color;
+
+    // Right edge
+    for (int y = rc.top; y < rc.bottom; y++)
+        bitmap[y * m_renderArea.Width() + rc.right - 1] = color;
 }
 
 void CTreeMap::AddRidge(const CRect& rc, std::array<double,4> & surface, const double h)
