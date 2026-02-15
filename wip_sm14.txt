@@ -1,0 +1,62 @@
+Résumé du Projet : WinDirStat ➔ SpaceMonger 1.4 (SM14)
+
+Objectif : Transformer le rendu "Cushion Treemap" (3D) de WinDirStat en un look "Nested Flat" (emboîté et plat) identique à SpaceMonger 1.4.
+1. Configuration Environnement
+
+    IDE : Visual Studio 2022 (v143 outils de build).
+
+    SDK : Windows 11 SDK + Universal C Runtime (nécessaire pour new.h).
+
+    Note Debug : Ne pas lancer VS en mode Admin pour que le débugueur puisse s'attacher au processus.
+
+2. Architecture de la modification (TreeMap.cpp)
+
+Nous avons hacké la fonction CTreeMap::DrawTreeMap pour passer d'un rendu pixel par pixel à une logique de "boîtes".
+
+    Structure DrawState : Ajout de int depth pour suivre la profondeur dans la hiérarchie.
+
+    Header & Frame : Pour chaque dossier, on dessine une barre de titre (Header) de 18px et on réduit l'espace des enfants (DeflateRect) pour créer un cadre coloré sur les côtés et le bas.
+
+3. Logique d'Agrégation (Le "Génie" de SM14)
+
+Pour éviter la pollution visuelle ("poussière" de petits fichiers) :
+
+    Seuil de zone : Si un objet fait moins de 400 pixels carrés à l'écran, il est agrégé (bloc uni).
+
+    Exception de Taille : Si un fichier/dossier dépasse SIGNIFICANT_SIZE (fixé à 5 Mo), il est toujours affiché, même si la zone écran est petite. Cela permet de voir les gros fichiers cachés dans WinSxS.
+
+    Hit-Test : La fonction FindItemByPoint a été modifiée pour s'arrêter au même niveau que le rendu (on ne peut pas cliquer sur ce qui est caché).
+
+4. État du Code (Points de repère Ctrl+F)
+
+Toutes les modifications sont marquées avec le label : // SM14.
+Les labels ne doivent pas être mis à jour. Ils me servent à CTRL+F : je ne comprends rien au C++.
+
+    Grille : Restaurée via un vecteur gridRects pour n'afficher les traits noirs que sur les blocs suffisamment grands (> 6px).
+
+    Labels : Utilisation de std::wstring et GetName() pour afficher les noms dans les Headers en noir.
+
+5. Prochaines étapes (Backlog)
+
+    Certains sous-dossiers ne sont toujours pas affichés (ex : C:\Users\Val\Documents\my games\COH2)
+
+    Réparer les autres options du Treemap (Couleurs par extension, etc.) si besoin.
+
+    Option pour colorier en fonction de l'extension ou de la profondeur
+
+
+
+
+    Rebase sur master
+
+    Clean écran options (slider vertical)
+    Clean commentaires
+    La preview de l'écran d'option est mise à jour pour tous les paramètres
+    Check performances avec pdc->DrawText ?
+    Limiter le nombre d'éléments dans headersToDraw ?
+    Comparer les perfs avant/après : resize, zoom
+    Revoir toutes les valeurs hardcodées (18px, 400px², 5Mo, 6px, RGB(200, 200, 200))
+    Il y a des régressions quand on essaye d'afficher le mode windirstat classique : il reste une aggregation même quand le slider min size est sur 0px
+
+
+

@@ -113,6 +113,8 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
         return;
     }
 
+    bool showHeaders = m_options.showHeaders;
+
     if (!m_options.grid)
     {
         // We shrink the rectangle here, too.
@@ -152,19 +154,22 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
     // That bitmap in turn will be created from this array
     std::vector<COLORREF> bitmapBits;
     bitmapBits.resize(static_cast<size_t>(rc.Width()) * static_cast<size_t>(rc.Height()));
-    DrawSolidRect(bitmapBits, CRect(CPoint(), rc.Size()), m_options.gridColor, PALETTE_BRIGHTNESS);
+    COLORREF bgColor = m_options.grid ? m_options.gridColor : RGB(0, 0, 0);
+    DrawSolidRect(bitmapBits, CRect(CPoint(), rc.Size()), bgColor, PALETTE_BRIGHTNESS);
 
     using DrawState = struct DrawState
     {
         std::array<double, 4> surface{};
         CRect rc{};
         CItem* item = nullptr;
+        int depth = 0;
         double h = 0.0;
         bool asroot = false;
 
-        DrawState(CItem* item_, const CRect rc_, const bool asroot_,
+        DrawState(CItem* item_, const CRect rc_, int depth_, const bool asroot_,
             const std::array<double, 4>& surface_, const double h_)
-            : surface(surface_), rc(rc_), item(item_), h(h_), asroot(asroot_) {}
+            : rc(rc_), item(item_), depth(depth_), asroot(asroot_), surface(surface_), h(h_) {
+        }
     };
 
     // Defined at top level to prevent reallocation
@@ -172,36 +177,158 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
     std::vector<double> rows;
     std::vector<int> childrenPerRow;
 
+    struct SM14Label { CRect rc; std::wstring name; };
+    std::vector<SM14Label> labelsToDraw;
+
+    double aggregationThreshold = 0.0001;
+    ULONGLONG minSizeToShowDetails = (ULONGLONG)(root->TmiGetSize() * aggregationThreshold);
+    struct SM14Header { CRect rc; std::wstring name; COLORREF color; bool isHeaderBar; };
+    std::vector<SM14Header> headersToDraw;
+    std::vector<CRect> gridRects;
+    std::vector<CRect> folderInnerRects;
+    struct SM14Line { CPoint p1; CPoint p2; };
+    std::vector<SM14Line> headerSeparators;
+
+    // Calculate bytes per pixel to determine grid border visibility based on actual file size
+    // rather than visual rectangle dimensions
+    const double totalPixels = static_cast<double>(rc.Width()) * rc.Height();
+    const double bytesPerPixel = totalPixels > 0 ? static_cast<double>(root->TmiGetSize()) / totalPixels : 1.0;
+
     // Main loop
-    const int gridWidth = m_options.grid ? 1 : 0;
     std::vector<DrawState> stack;
-    stack.emplace_back(root, CRect(0, 0, rc.Width(), rc.Height()), true,
+    stack.emplace_back(root, CRect(0, 0, rc.Width(), rc.Height()), 0, true,
         std::array<double, 4>{}, m_options.height);
+
+    const COLORREF fileTreeColors[] = {
+        COptions::FileTreeColor0.Obj(),
+        COptions::FileTreeColor1.Obj(),
+        COptions::FileTreeColor2.Obj(),
+        COptions::FileTreeColor3.Obj(),
+        COptions::FileTreeColor4.Obj(),
+        COptions::FileTreeColor5.Obj(),
+        COptions::FileTreeColor6.Obj(),
+        COptions::FileTreeColor7.Obj()
+    };
+
     while (!stack.empty())
     {
         DrawState state = stack.back();
         stack.pop_back();
         CItem* item = state.item;
 
-        // Process the current state
+        if (state.rc.Width() <= 0 || state.rc.Height() <= 0)
+        {
+            item->TmiSetRectangle(CRect(-1, -1, -1, -1));
+            for (int i = 0; i < item->TmiGetChildCount(); ++i)
+            {
+                item->TmiGetChild(i)->TmiSetRectangle(CRect(-1, -1, -1, -1));
+            }
+            continue; // On passe à l'élément suivant sans empiler les enfants
+        }
+
         item->TmiSetRectangle(state.rc);
 
-        if (state.rc.Width() <= gridWidth || state.rc.Height() <= gridWidth)
-        {
-            continue;
-        }
+        // --- FIX 1: CALCULATE CUSHION SHADING GEOMETRY ---
+        // This modifies state.surface, which is then passed to children.
+        // Without this, the surface remains flat (0,0,0,0) and shading doesn't work.
+        AddRidge(state.rc, state.surface, state.h);
+        // ------------------------------------------------
 
-        if (IsCushionShading() && (!state.asroot))
-        {
-            AddRidge(state.rc, state.surface, state.h);
-        }
-
+        COLORREF currentColor;
+        // Folders always use depth-based coloring (extension colors are only for files)
         if (item->TmiIsLeaf())
         {
-            // Leaf node, render it
-            RenderLeaf(bitmapBits, item, state.surface);
+            // Use extension-based coloring only for files (original behavior)
+            currentColor = item->TmiGetGraphColor();
+        }
+        else
+        {
+            // Use depth-based coloring for folders or when DepthColor scheme is selected
+            if (state.depth == 0)
+            {
+                currentColor = RGB(200, 200, 200);
+            }
+            else
+            {
+                currentColor = fileTreeColors[(state.depth - 1) % 8];
+            }
+        }
+
+        double area = (double)state.rc.Width() * state.rc.Height();
+        const ULONGLONG SIGNIFICANT_SIZE = 5 * 1024 * 1024;
+        bool isSignificant = (item->TmiGetSize() > SIGNIFICANT_SIZE);
+
+        bool forceLeaf = (area < 25.0 && !isSignificant) ||
+            (item->TmiGetSize() < minSizeToShowDetails);
+        if (item->TmiIsLeaf() || forceLeaf)
+        {
+            if (item->TmiIsLeaf()) {
+                // Fichier normal : rendu avec effet cushion et couleur d'extension
+                RenderLeaf(bitmapBits, item, state.surface);
+            }
+            else {
+                // Dossier agrégé : on le peint d'un bloc avec sa couleur de profondeur (currentColor)
+                // pour éviter que RenderLeaf ne le dessine en noir.
+                DrawSolidRect(bitmapBits, state.rc, currentColor, PALETTE_BRIGHTNESS);
+            }
+
+            // Grille pour les feuilles
+            if (m_options.grid && bytesPerPixel > 0.0)
+            {
+                const double pixelEquivalent = item->TmiGetSize() / bytesPerPixel;
+                if (pixelEquivalent > m_options.gridMinimumArea)
+                {
+                    gridRects.push_back(state.rc);
+                }
+            }
+
+            if (state.rc.Width() > 60 && state.rc.Height() > 20)
+                headersToDraw.push_back({ state.rc, item->GetName(), currentColor, false });
+
+            if (forceLeaf) {
+                for (int i = 0; i < item->TmiGetChildCount(); ++i)
+                    item->TmiGetChild(i)->TmiSetRectangle(CRect(-1, -1, -1, -1));
+            }
             continue;
         }
+
+        // --- SM14 : DESSIN DES DOSSIERS ---
+        // ASTUCE : On peint TOUT le rectangle du dossier. Ainsi, les bordures 
+        // créées par DeflateRect et les espaces vides liés aux arrondis
+        // prendront la couleur du dossier au lieu de faire des trous noirs.
+        DrawSolidRect(bitmapBits, state.rc, currentColor, PALETTE_BRIGHTNESS);
+
+        // L'équerre (L-shape) est toujours dessinée si la grille est active
+        if (m_options.grid) gridRects.push_back(state.rc);
+
+        int headerHeight = 18;
+
+        // --- CONDITION DU CHECKBOX ICI ---
+        if (showHeaders && state.rc.Height() > headerHeight + 10 && state.rc.Width() > 30)
+        {
+            CRect headerRc = state.rc;
+            headerRc.bottom = headerRc.top + headerHeight;
+            // (Plus besoin de DrawSolidRect ici car on vient de peindre tout state.rc au-dessus)
+
+            // 2. La ligne de séparation
+            headerSeparators.push_back({
+                CPoint(state.rc.left, state.rc.top + headerHeight),
+                CPoint(state.rc.right, state.rc.top + headerHeight)
+                });
+
+            // 3. Add header to draw list for text
+            headersToDraw.push_back({ headerRc, item->GetName(), currentColor, true });
+
+            // 4. On réduit l'espace disponible pour les enfants
+            // Les 3 pixels sur les bords qui ne seront pas couverts par les enfants 
+            // resteront visibles dans "currentColor" (effet bordure colorée style SpaceMonger)
+            state.rc.top += headerHeight;
+            state.rc.DeflateRect(3, 0, 3, 3);
+
+            // 5. Cadre interne uniquement si Headers actifs
+            if (m_options.grid) folderInnerRects.push_back(state.rc);
+        }
+        // --------------------------------------------
 
         if (m_options.style == KDirStatStyle) [[msvc::flatten]]
         {
@@ -261,7 +388,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
                     }
 
                     // Prepare child state and push onto the stack
-                    stack.emplace_back(child, rcChild, false, state.surface,
+                    stack.emplace_back(child, rcChild, state.depth + 1, false, state.surface,
                         state.h * m_options.scaleFactor);
 
                     left = fRight;
@@ -378,7 +505,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
                     // Prepare child state and push onto the stack
                     if (childSize > 0)
                     {
-                        stack.emplace_back(item->TmiGetChild(i), rcChild, false, state.surface, state.h * m_options.scaleFactor);
+                        stack.emplace_back(item->TmiGetChild(i), rcChild, state.depth + 1, false, state.surface, state.h * m_options.scaleFactor);
                     }
 
                     fBegin = fEnd;
@@ -415,6 +542,63 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
         CSelectObject sobmp(&dcTreeView, &bmp);
         pdc->BitBlt(rc.TopLeft().x, rc.TopLeft().y, rc.Width(), rc.Height(), &dcTreeView, 0, 0, SRCCOPY);
     }
+
+    pdc->SetBkMode(TRANSPARENT);
+    CFont font;
+    font.CreatePointFont(85, L"Segoe UI Bold");
+    CSelectObject sofont(pdc, &font);
+
+    // --- SM14 : DESSIN DES TEXTES ---
+    // Text is only shown when cushion shading is disabled (flat mode)
+    // This allows cushion shading and SM14 features to work independently
+    bool isCushion = IsCushionShading();
+
+    for (auto& h : headersToDraw) {
+        // Si le mode Cushion est activé ET que ce n'est pas une barre de header (donc un corps de fichier)
+        // on ignore le dessin du texte.
+        if (isCushion && !h.isHeaderBar) {
+            continue;
+        }
+
+        pdc->SetTextColor(RGB(0, 0, 0));
+        CRect textRc = h.rc;
+        textRc.DeflateRect(4, 1);
+
+        pdc->DrawText(h.name.c_str(), (int)h.name.length(), &textRc,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+
+    if (m_options.grid)
+    {
+        CPen gridPen(PS_SOLID, 1, RGB(0, 0, 0));
+        CSelectObject sogrid(pdc, &gridPen);
+
+        pdc->MoveTo(m_renderArea.left, m_renderArea.bottom);
+        pdc->LineTo(m_renderArea.left, m_renderArea.top);
+        pdc->LineTo(m_renderArea.right, m_renderArea.top);
+
+        for (const auto& rect : gridRects)
+        {
+            pdc->MoveTo(rect.left, rect.bottom);
+            pdc->LineTo(rect.right, rect.bottom);
+            pdc->LineTo(rect.right, rect.top);
+        }
+
+        if (showHeaders)
+        {
+            for (const auto& line : headerSeparators)
+            {
+                pdc->MoveTo(line.p1);
+                pdc->LineTo(line.p2);
+            }
+
+            CSelectStockObject sobrush(pdc, NULL_BRUSH);
+            for (const auto& iRect : folderInnerRects)
+            {
+                pdc->Rectangle(&iRect);
+            }
+        }
+    }
 }
 
 CItem* CTreeMap::FindItemByPoint(CItem* item, const CPoint point)
@@ -427,55 +611,39 @@ CItem* CTreeMap::FindItemByPoint(CItem* item, const CPoint point)
         return nullptr;
     }
 
-    ASSERT(rc.PtInRect(point));
-
-    CItem* ret = nullptr;
+    // On a besoin de la taille totale pour le ratio. 
+    // WinDirStat stocke souvent le root dans la vue, mais ici on va juste
+    // vérifier si l'item actuel est celui qu'on a décidé de ne pas "ouvrir"
 
     const int gridWidth = m_options.grid ? 1 : 0;
 
-    if (rc.Width() <= gridWidth ||
-        rc.Height() <= gridWidth ||
-        item->TmiIsLeaf())
+    // Si c'est une feuille, OU si le rectangle est trop petit, OU si on est 
+    // dans un dossier agrégé (logique simplifiée : si les enfants n'ont pas de rect)
+    if (rc.Width() <= gridWidth || rc.Height() <= gridWidth || item->TmiIsLeaf())
     {
-        ret = item;
+        return item;
     }
     else
     {
-        ASSERT(item->TmiGetSize() > 0);
-        ASSERT(item->TmiGetChildCount() > 0);
-
+        CItem* ret = nullptr;
         for (const int i : std::views::iota(0, item->TmiGetChildCount()))
         {
             CItem* child = item->TmiGetChild(i);
+            const CRect& rcChild = child->TmiGetRectangle();
 
-            ASSERT(child->TmiGetSize() > 0);
+            // SM14 : Si l'enfant n'a pas de rectangle valide (jamais dessiné), 
+            // on l'ignore. Ça veut dire qu'on a atteint la limite de l'agrégation.
+            if (rcChild.left == -1 || !rcChild.PtInRect(point))
+                continue;
 
-#ifdef _DEBUG
-            const CRect rcChild(child->TmiGetRectangle());
-            ASSERT(rcChild.right >= rcChild.left);
-            ASSERT(rcChild.bottom >= rcChild.top);
-            ASSERT(rcChild.left >= rc.left);
-            ASSERT(rcChild.right <= rc.right);
-            ASSERT(rcChild.top >= rc.top);
-            ASSERT(rcChild.bottom <= rc.bottom);
-#endif
-            if (child->TmiGetRectangle().PtInRect(point))
-            {
-                ret = FindItemByPoint(child, point);
-                ASSERT(ret != nullptr);
-                break;
-            }
+            ret = FindItemByPoint(child, point);
+            if (ret) break;
         }
+
+        // Si on est dans un dossier mais qu'aucun enfant n'a revendiqué le clic
+        // (parce qu'on ne les a pas dessinés), alors c'est le dossier lui-même l'item.
+        return ret ? ret : item;
     }
-
-    ASSERT(ret != nullptr);
-
-    if (ret == nullptr)
-    {
-        ret = item;
-    }
-
-    return ret;
 }
 
 void CTreeMap::DrawColorPreview(CDC* pdc, const CRect& rc, const COLORREF color, const Options* options)

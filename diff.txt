@@ -1,0 +1,532 @@
+commit 93c1e93fbac619ec810691ba6460be9482d080eb
+Author: vpi <v.pi@hotmail.fr>
+Date:   Sun Feb 15 21:52:30 2026 +0100
+
+    spacemonger look in windirstat
+
+diff --git a/windirstat/Controls/TreeMap.cpp b/windirstat/Controls/TreeMap.cpp
+index 12af66c7..a6979afc 100644
+--- a/windirstat/Controls/TreeMap.cpp
++++ b/windirstat/Controls/TreeMap.cpp
+@@ -113,6 +113,8 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
+         return;
+     }
+ 
++    bool showHeaders = m_options.showHeaders;
++
+     if (!m_options.grid)
+     {
+         // We shrink the rectangle here, too.
+@@ -152,19 +154,22 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
+     // That bitmap in turn will be created from this array
+     std::vector<COLORREF> bitmapBits;
+     bitmapBits.resize(static_cast<size_t>(rc.Width()) * static_cast<size_t>(rc.Height()));
+-    DrawSolidRect(bitmapBits, CRect(CPoint(), rc.Size()), m_options.gridColor, PALETTE_BRIGHTNESS);
++    COLORREF bgColor = m_options.grid ? m_options.gridColor : RGB(0, 0, 0);
++    DrawSolidRect(bitmapBits, CRect(CPoint(), rc.Size()), bgColor, PALETTE_BRIGHTNESS);
+ 
+     using DrawState = struct DrawState
+     {
+         std::array<double, 4> surface{};
+         CRect rc{};
+         CItem* item = nullptr;
++        int depth = 0;
+         double h = 0.0;
+         bool asroot = false;
+ 
+-        DrawState(CItem* item_, const CRect rc_, const bool asroot_,
++        DrawState(CItem* item_, const CRect rc_, int depth_, const bool asroot_,
+             const std::array<double, 4>& surface_, const double h_)
+-            : surface(surface_), rc(rc_), item(item_), h(h_), asroot(asroot_) {}
++            : rc(rc_), item(item_), depth(depth_), asroot(asroot_), surface(surface_), h(h_) {
++        }
+     };
+ 
+     // Defined at top level to prevent reallocation
+@@ -172,37 +177,109 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
+     std::vector<double> rows;
+     std::vector<int> childrenPerRow;
+ 
++    struct SM14Label { CRect rc; std::wstring name; };
++    std::vector<SM14Label> labelsToDraw;
++
++    double aggregationThreshold = 0.005;
++    ULONGLONG minSizeToShowDetails = (ULONGLONG)(root->TmiGetSize() * aggregationThreshold);
++    struct SM14Header { CRect rc; std::wstring name; COLORREF color; };
++    std::vector<SM14Header> headersToDraw;
++    std::vector<CRect> gridRects;
++    std::vector<CRect> folderInnerRects;
++    struct SM14Line { CPoint p1; CPoint p2; };
++    std::vector<SM14Line> headerSeparators;
++
+     // Main loop
+     const int gridWidth = m_options.grid ? 1 : 0;
+     std::vector<DrawState> stack;
+-    stack.emplace_back(root, CRect(0, 0, rc.Width(), rc.Height()), true,
++    stack.emplace_back(root, CRect(0, 0, rc.Width(), rc.Height()), 0, true,
+         std::array<double, 4>{}, m_options.height);
++
++    const COLORREF fileTreeColors[] = {
++        COptions::FileTreeColor0.Obj(),
++        COptions::FileTreeColor1.Obj(),
++        COptions::FileTreeColor2.Obj(),
++        COptions::FileTreeColor3.Obj(),
++        COptions::FileTreeColor4.Obj(),
++        COptions::FileTreeColor5.Obj(),
++        COptions::FileTreeColor6.Obj(),
++        COptions::FileTreeColor7.Obj()
++    };
++
+     while (!stack.empty())
+     {
+         DrawState state = stack.back();
+         stack.pop_back();
+         CItem* item = state.item;
+ 
+-        // Process the current state
+         item->TmiSetRectangle(state.rc);
+ 
+-        if (state.rc.Width() <= gridWidth || state.rc.Height() <= gridWidth)
++        COLORREF currentColor;
++        if (state.depth == 0)
+         {
+-            continue;
++            currentColor = RGB(200, 200, 200);
+         }
+-
+-        if (IsCushionShading() && (!state.asroot))
++        else
+         {
+-            AddRidge(state.rc, state.surface, state.h);
++            currentColor = fileTreeColors[(state.depth - 1) % 8];
+         }
+ 
+-        if (item->TmiIsLeaf())
++        double area = (double)state.rc.Width() * state.rc.Height();
++        const ULONGLONG SIGNIFICANT_SIZE = 5 * 1024 * 1024;
++        bool isSignificant = (item->TmiGetSize() > SIGNIFICANT_SIZE);
++
++        bool forceLeaf = (area < 400.0 && !isSignificant) ||
++            (item->TmiGetSize() < minSizeToShowDetails);
++
++        if (item->TmiIsLeaf() || forceLeaf)
+         {
+-            // Leaf node, render it
+-            RenderLeaf(bitmapBits, item, state.surface);
++            DrawSolidRect(bitmapBits, state.rc, currentColor, PALETTE_BRIGHTNESS);
++
++            if (m_options.grid && area > 200.0) gridRects.push_back(state.rc);
++
++            // On affiche le label sur les feuilles si assez grand, même si Headers OFF
++            // (SpaceMonger affiche toujours le texte des gros fichiers)
++            if (state.rc.Width() > 60 && state.rc.Height() > 20)
++                headersToDraw.push_back({ state.rc, item->GetName(), currentColor });
++
++            if (forceLeaf) {
++                for (int i = 0; i < item->TmiGetChildCount(); ++i)
++                    item->TmiGetChild(i)->TmiSetRectangle(CRect(-1, -1, -1, -1));
++            }
+             continue;
+         }
+ 
++        // --- SM14 : DESSIN DES DOSSIERS ---
++        DrawSolidRect(bitmapBits, state.rc, currentColor, PALETTE_BRIGHTNESS);
++
++        // L'équerre (L-shape) est toujours dessinée si la grille est active
++        if (m_options.grid) gridRects.push_back(state.rc);
++
++        int headerHeight = 18;
++
++        // --- CONDITION DU CHECKBOX ICI ---
++        // On ne crée le header et on ne réduit la zone QUE si showHeaders est vrai
++        if (showHeaders && state.rc.Height() > headerHeight + 10 && state.rc.Width() > 30)
++        {
++            // 1. La ligne de séparation
++            headerSeparators.push_back({
++                CPoint(state.rc.left, state.rc.top + headerHeight),
++                CPoint(state.rc.right, state.rc.top + headerHeight)
++                });
++
++            CRect headerRc = state.rc;
++            headerRc.bottom = headerRc.top + headerHeight;
++            headersToDraw.push_back({ headerRc, item->GetName(), currentColor });
++
++            // 2. On réduit l'espace disponible pour les enfants
++            state.rc.top += headerHeight;
++            state.rc.DeflateRect(3, 0, 3, 3);
++
++            // 3. Cadre interne uniquement si Headers actifs
++            if (m_options.grid) folderInnerRects.push_back(state.rc);
++        }
++        // --------------------------------------------
++
+         if (m_options.style == KDirStatStyle) [[msvc::flatten]]
+         {
+             // Reset vectors for next run
+@@ -261,7 +338,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
+                     }
+ 
+                     // Prepare child state and push onto the stack
+-                    stack.emplace_back(child, rcChild, false, state.surface,
++                    stack.emplace_back(child, rcChild, state.depth + 1, false, state.surface,
+                         state.h * m_options.scaleFactor);
+ 
+                     left = fRight;
+@@ -378,7 +455,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
+                     // Prepare child state and push onto the stack
+                     if (childSize > 0)
+                     {
+-                        stack.emplace_back(item->TmiGetChild(i), rcChild, false, state.surface, state.h * m_options.scaleFactor);
++                        stack.emplace_back(item->TmiGetChild(i), rcChild, state.depth + 1, false, state.surface, state.h * m_options.scaleFactor);
+                     }
+ 
+                     fBegin = fEnd;
+@@ -416,6 +493,58 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
+         pdc->BitBlt(rc.TopLeft().x, rc.TopLeft().y, rc.Width(), rc.Height(), &dcTreeView, 0, 0, SRCCOPY);
+     }
+ 
++    pdc->SetBkMode(TRANSPARENT);
++    CFont font;
++    font.CreatePointFont(85, L"Segoe UI Bold");
++    CSelectObject sofont(pdc, &font);
++
++    // --- SM14 : DESSIN DES TEXTES ---
++    // Les noms des fichiers sont toujours dessinés (si place suffisante)
++    // Les noms des dossiers ne sont dessinés que si showHeaders est actif
++    for (auto& h : headersToDraw) {
++        // Petite sécurité : si headers OFF, on ne dessine que les fichiers (qui n'ont pas de séparateur)
++        // Mais comme on n'a pas ajouté les dossiers à 'headersToDraw' plus haut si showHeaders est false,
++        // cette boucle dessinera naturellement juste les fichiers.
++        pdc->SetTextColor(RGB(0, 0, 0));
++        CRect textRc = h.rc;
++        textRc.DeflateRect(4, 1);
++
++        pdc->DrawText(h.name.c_str(), (int)h.name.length(), &textRc,
++            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
++    }
++
++    if (m_options.grid)
++    {
++        CPen gridPen(PS_SOLID, 1, RGB(0, 0, 0));
++        CSelectObject sogrid(pdc, &gridPen);
++
++        pdc->MoveTo(m_renderArea.left, m_renderArea.bottom);
++        pdc->LineTo(m_renderArea.left, m_renderArea.top);
++        pdc->LineTo(m_renderArea.right, m_renderArea.top);
++
++        for (const auto& rect : gridRects)
++        {
++            pdc->MoveTo(rect.left, rect.bottom);
++            pdc->LineTo(rect.right, rect.bottom);
++            pdc->LineTo(rect.right, rect.top);
++        }
++
++        if (showHeaders)
++        {
++            for (const auto& line : headerSeparators)
++            {
++                pdc->MoveTo(line.p1);
++                pdc->LineTo(line.p2);
++            }
++
++            CSelectStockObject sobrush(pdc, NULL_BRUSH);
++            for (const auto& iRect : folderInnerRects)
++            {
++                pdc->Rectangle(&iRect);
++            }
++        }
++    }
++
+     // Free memory
+     bmp.DeleteObject();
+     dcTreeView.DeleteDC();
+@@ -431,55 +560,47 @@ CItem* CTreeMap::FindItemByPoint(CItem* item, const CPoint point)
+         return nullptr;
+     }
+ 
+-    ASSERT(rc.PtInRect(point));
++    // --- SM14 : Logique de seuil identique au rendu ---
++    // On récupère la taille du root (le premier item passé à DrawTreeMap)
++    // Pour simplifier ici, on va recalculer le seuil basé sur la taille de l'item racine
++    // Note : Dans une PR propre, on stockerait m_minSizeToShowDetails dans la classe.
++
++    // On simule le même seuil (0.005 ou 0.02 selon ce que tu as mis)
++    double aggregationThreshold = 0.005;
+ 
+-    CItem* ret = nullptr;
++    // On a besoin de la taille totale pour le ratio. 
++    // WinDirStat stocke souvent le root dans la vue, mais ici on va juste
++    // vérifier si l'item actuel est celui qu'on a décidé de ne pas "ouvrir"
+ 
+     const int gridWidth = m_options.grid ? 1 : 0;
+ 
+-    if (rc.Width() <= gridWidth ||
+-        rc.Height() <= gridWidth ||
+-        item->TmiIsLeaf())
++    // Si c'est une feuille, OU si le rectangle est trop petit, OU si on est 
++    // dans un dossier agrégé (logique simplifiée : si les enfants n'ont pas de rect)
++    if (rc.Width() <= gridWidth || rc.Height() <= gridWidth || item->TmiIsLeaf())
+     {
+-        ret = item;
++        return item;
+     }
+     else
+     {
+-        ASSERT(item->TmiGetSize() > 0);
+-        ASSERT(item->TmiGetChildCount() > 0);
+-
++        CItem* ret = nullptr;
+         for (const int i : std::views::iota(0, item->TmiGetChildCount()))
+         {
+             CItem* child = item->TmiGetChild(i);
++            const CRect& rcChild = child->TmiGetRectangle();
+ 
+-            ASSERT(child->TmiGetSize() > 0);
++            // SM14 : Si l'enfant n'a pas de rectangle valide (jamais dessiné), 
++            // on l'ignore. Ça veut dire qu'on a atteint la limite de l'agrégation.
++            if (rcChild.left == -1 || !rcChild.PtInRect(point))
++                continue;
+ 
+-#ifdef _DEBUG
+-            const CRect rcChild(child->TmiGetRectangle());
+-            ASSERT(rcChild.right >= rcChild.left);
+-            ASSERT(rcChild.bottom >= rcChild.top);
+-            ASSERT(rcChild.left >= rc.left);
+-            ASSERT(rcChild.right <= rc.right);
+-            ASSERT(rcChild.top >= rc.top);
+-            ASSERT(rcChild.bottom <= rc.bottom);
+-#endif
+-            if (child->TmiGetRectangle().PtInRect(point))
+-            {
+-                ret = FindItemByPoint(child, point);
+-                ASSERT(ret != nullptr);
+-                break;
+-            }
++            ret = FindItemByPoint(child, point);
++            if (ret) break;
+         }
+-    }
+ 
+-    ASSERT(ret != nullptr);
+-
+-    if (ret == nullptr)
+-    {
+-        ret = item;
++        // Si on est dans un dossier mais qu'aucun enfant n'a revendiqué le clic
++        // (parce qu'on ne les a pas dessinés), alors c'est le dossier lui-même l'item.
++        return ret ? ret : item;
+     }
+-
+-    return ret;
+ }
+ 
+ void CTreeMap::DrawColorPreview(CDC* pdc, const CRect& rc, const COLORREF color, const Options* options)
+diff --git a/windirstat/Controls/TreeMap.h b/windirstat/Controls/TreeMap.h
+index f4cb4254..92f41035 100644
+--- a/windirstat/Controls/TreeMap.h
++++ b/windirstat/Controls/TreeMap.h
+@@ -135,6 +135,7 @@ public:
+     {
+         STYLE style;         // Squarification method
+         bool grid;           // Whether to draw grid lines
++        bool showHeaders;    // Whether to draw headers for folders
+         COLORREF gridColor;  // Color of grid lines
+         double brightness;   // 0..1.0   (default = 0.84)
+         double height;       // >= 0.0    (default = 0.40)    Factor "H"
+@@ -218,6 +219,7 @@ protected:
+     static constexpr Options DefaultOptions = {
+         .style = KDirStatStyle,
+         .grid = false,
++        .showHeaders = false,
+         .gridColor = RGB(0, 0, 0),
+         .brightness = 0.88,
+         .height = 0.38,
+diff --git a/windirstat/Options.cpp b/windirstat/Options.cpp
+index f588b8c6..5c02dcd1 100644
+--- a/windirstat/Options.cpp
++++ b/windirstat/Options.cpp
+@@ -72,6 +72,7 @@ Setting<bool> COptions::ShowDupeDetectionCloudLinksWarning(OptionsGeneral, L"Sho
+ Setting<bool> COptions::AutoElevate(OptionsGeneral, L"AutoElevate", false);
+ Setting<bool> COptions::AutoMapDrivesWhenElevated(OptionsGeneral, L"AutoMapDrivesWhenElevated", true);
+ Setting<bool> COptions::TreeMapGrid(OptionsTreeMap, L"TreeMapGrid", (CTreeMap::GetDefaults().grid));
++Setting<bool> COptions::TreeMapHeaders(OptionsTreeMap, L"TreeMapHeaders", (CTreeMap::GetDefaults().showHeaders));
+ Setting<bool> COptions::TreeMapUseLogical(OptionsTreeMap, L"TreeMapUseLogicalSize", false);
+ Setting<bool> COptions::UseBackupRestore(OptionsGeneral, L"UseBackupRestore", true);
+ Setting<bool> COptions::UseDrawTextCache(OptionsGeneral, L"UseDrawTextCache", true);
+@@ -183,6 +184,7 @@ void COptions::SetTreeMapOptions(const CTreeMap::Options& options)
+ 
+     TreeMapStyle = static_cast<int>(TreeMapOptions.style);
+     TreeMapGrid = TreeMapOptions.grid;
++    TreeMapHeaders = TreeMapOptions.showHeaders;
+     TreeMapGridColor = TreeMapOptions.gridColor;
+     TreeMapBrightness = TreeMapOptions.GetBrightnessPercent();
+     TreeMapHeightFactor = TreeMapOptions.GetHeightPercent();
+@@ -258,6 +260,7 @@ void COptions::PostProcessPersistedSettings()
+     // Load treemap settings
+     TreeMapOptions.style = static_cast<CTreeMap::STYLE>(static_cast<int>(TreeMapStyle));
+     TreeMapOptions.grid = TreeMapGrid;
++    TreeMapOptions.showHeaders = TreeMapHeaders;
+     TreeMapOptions.gridColor = TreeMapGridColor;
+     TreeMapOptions.SetBrightnessPercent(TreeMapBrightness);
+     TreeMapOptions.SetHeightPercent(TreeMapHeightFactor);
+diff --git a/windirstat/Options.h b/windirstat/Options.h
+index 4184e45a..35b34bf3 100644
+--- a/windirstat/Options.h
++++ b/windirstat/Options.h
+@@ -156,6 +156,7 @@ public:
+     static Setting<bool> ShowDupeDetectionCloudLinksWarning;
+     static Setting<bool> AutoElevate;
+     static Setting<bool> TreeMapGrid;
++    static Setting<bool> TreeMapHeaders;
+     static Setting<bool> TreeMapUseLogical;
+     static Setting<bool> UseBackupRestore;
+     static Setting<bool> UseDrawTextCache;
+diff --git a/windirstat/Pages/PageTreeMap.cpp b/windirstat/Pages/PageTreeMap.cpp
+index 0bac5f9e..ecac520b 100644
+--- a/windirstat/Pages/PageTreeMap.cpp
++++ b/windirstat/Pages/PageTreeMap.cpp
+@@ -55,6 +55,7 @@ void CPageTreeMap::DoDataExchange(CDataExchange* pDX)
+ 
+     DDX_Radio(pDX, IDC_KDIRSTAT, m_style);
+     DDX_Check(pDX, IDC_TREEMAPGRID, m_grid);
++    DDX_Check(pDX, IDC_TREEMAPHEADER, m_headers);
+ 
+     DDX_Text(pDX, IDC_STATICBRIGHTNESS, m_sBrightness);
+     DDX_Slider(pDX, IDC_BRIGHTNESS, m_nBrightness);
+@@ -140,6 +141,7 @@ void CPageTreeMap::UpdateOptions(const bool save)
+         m_options.SetLightSourcePoint(m_ptLightSource);
+         m_options.style = m_style == 0 ? CTreeMap::KDirStatStyle : CTreeMap::SequoiaViewStyle;
+         m_options.grid = FALSE != m_grid;
++        m_options.showHeaders = FALSE != m_headers;
+         m_options.gridColor = m_gridColor.GetColor();
+     }
+     else
+@@ -151,6 +153,7 @@ void CPageTreeMap::UpdateOptions(const bool save)
+         m_ptLightSource = m_options.GetLightSourcePoint();
+         m_style = m_options.style == CTreeMap::KDirStatStyle ? 0 : 1;
+         m_grid = m_options.grid;
++        m_headers = m_options.showHeaders;
+         m_gridColor.SetColor(m_options.gridColor);
+     }
+ }
+diff --git a/windirstat/Pages/PageTreeMap.h b/windirstat/Pages/PageTreeMap.h
+index b1c15aa4..7bdf838a 100644
+--- a/windirstat/Pages/PageTreeMap.h
++++ b/windirstat/Pages/PageTreeMap.h
+@@ -53,6 +53,7 @@ protected:
+     int m_style = 0;
+     CColorButton m_highlightColor;
+     BOOL m_grid = 0;
++    BOOL m_headers = 0;
+     CColorButton m_gridColor;
+ 
+     CSliderCtrl m_brightness;
+diff --git a/windirstat/res/LangStrings.h b/windirstat/res/LangStrings.h
+index ef3504f8..328f3458 100644
+--- a/windirstat/res/LangStrings.h
++++ b/windirstat/res/LangStrings.h
+@@ -217,6 +217,7 @@ constexpr std::wstring_view IDS_PAGE_TREEMAP_KDIRSTAT = L"IDS_PAGE_TREEMAP_KDIRS
+ constexpr std::wstring_view IDS_PAGE_TREEMAP_SCALE = L"IDS_PAGE_TREEMAP_SCALE";
+ constexpr std::wstring_view IDS_PAGE_TREEMAP_SEQUOIA = L"IDS_PAGE_TREEMAP_SEQUOIA";
+ constexpr std::wstring_view IDS_PAGE_TREEMAP_SHOW_GRID = L"IDS_PAGE_TREEMAP_SHOW_GRID";
++constexpr std::wstring_view IDS_PAGE_TREEMAP_SHOW_HEADERS = L"IDS_PAGE_TREEMAP_SHOW_HEADERS";
+ constexpr std::wstring_view IDS_PAGE_TREEMAP_STYLE = L"IDS_PAGE_TREEMAP_STYLE";
+ constexpr std::wstring_view IDS_PAGE_TREEMAP_TITLE = L"IDS_PAGE_TREEMAP_TITLE";
+ constexpr std::wstring_view IDS_POLICY_NOREFRESH = L"IDS_POLICY_NOREFRESH";
+diff --git a/windirstat/res/langs/lang_en.txt b/windirstat/res/langs/lang_en.txt
+index 8bff4765..0f7536c8 100644
+--- a/windirstat/res/langs/lang_en.txt
++++ b/windirstat/res/langs/lang_en.txt
+@@ -214,6 +214,7 @@ IDS_PAGE_TREEMAP_KDIRSTAT=&KDirStat
+ IDS_PAGE_TREEMAP_SCALE=&Scale\nFactor
+ IDS_PAGE_TREEMAP_SEQUOIA=Se&quoiaView
+ IDS_PAGE_TREEMAP_SHOW_GRID=Show &Grid
++IDS_PAGE_TREEMAP_SHOW_HEADERS=Show &Headers
+ IDS_PAGE_TREEMAP_STYLE=St&yle
+ IDS_PAGE_TREEMAP_TITLE=Treemap
+ IDS_POLICY_NOREFRESH=No refresh
+diff --git a/windirstat/resource.h b/windirstat/resource.h
+index 73c23a3c..7b01b144 100644
+--- a/windirstat/resource.h
++++ b/windirstat/resource.h
+@@ -151,6 +151,7 @@
+ #define IDC_PROCESS_HARDLINKS           1116
+ #define IDC_CONTEXT_MENU                1117
+ #define IDC_SHOW_MICROSOFT_PROGRESS     1118
++#define IDC_TREEMAPHEADER               1119
+ #define ID_WDS_CONTROL                  4711
+ #define ID_CLEANUP_EXPLORER_SELECT      32768
+ #define ID_TREEMAP_ZOOMIN               32769
+diff --git a/windirstat/windirstat.rc b/windirstat/windirstat.rc
+index c328990d..2f98692d 100644
+--- a/windirstat/windirstat.rc
++++ b/windirstat/windirstat.rc
+@@ -527,9 +527,10 @@ BEGIN
+     GROUPBOX        "IDS_PAGE_TREEMAP_STYLE",IDC_STATIC,10,146,80,53
+     CONTROL         "IDS_PAGE_TREEMAP_KDIRSTAT",IDC_KDIRSTAT,"Button",BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP,15,162,62,10
+     CONTROL         "IDS_PAGE_TREEMAP_SEQUOIA",IDC_SEQUOIAVIEW,"Button",BS_AUTORADIOBUTTON,15,179,68,10
+-    CONTROL         "IDS_PAGE_TREEMAP_SHOW_GRID",IDC_TREEMAPGRID,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,97,149,156,10
+-    PUSHBUTTON      "IDS_PAGE_TREEMAP_GRID_COLOR",IDC_TREEMAPGRIDCOLOR,97,164,156,14,0,WS_EX_RIGHT
+-    PUSHBUTTON      "IDS_PAGE_TREEMAP_BORDER_COLOR",IDC_TREEMAPHIGHLIGHTCOLOR,97,185,156,14,0,WS_EX_RIGHT
++    CONTROL         "IDS_PAGE_TREEMAP_SHOW_GRID",IDC_TREEMAPGRID,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,98,145,156,10
++    CONTROL         "IDS_PAGE_TREEMAP_SHOW_HEADERS",IDC_TREEMAPHEADER,"Button",BS_AUTOCHECKBOX | WS_TABSTOP,97,156,156,10
++    PUSHBUTTON      "IDS_PAGE_TREEMAP_GRID_COLOR",IDC_TREEMAPGRIDCOLOR,97,167,156,14,0,WS_EX_RIGHT
++    PUSHBUTTON      "IDS_PAGE_TREEMAP_BORDER_COLOR",IDC_TREEMAPHIGHLIGHTCOLOR,97,182,156,14,0,WS_EX_RIGHT
+     CTEXT           "IDS_PAGE_TREEMAP_INCIDENCE",IDC_STATIC,251,145,65,11
+     LTEXT           "Static",IDC_LIGHTSOURCE,257,156,52,45,WS_TABSTOP
+     PUSHBUTTON      "",IDC_RESET,314,158,64,41,BS_MULTILINE
+diff --git a/wip_sm14.txt b/wip_sm14.txt
+new file mode 100644
+index 00000000..da66cccc
+--- /dev/null
++++ b/wip_sm14.txt
+@@ -0,0 +1,49 @@
++Résumé du Projet : WinDirStat ➔ SpaceMonger 1.4 (SM14)
++
++Objectif : Transformer le rendu "Cushion Treemap" (3D) de WinDirStat en un look "Nested Flat" (emboîté et plat) identique à SpaceMonger 1.4.
++1. Configuration Environnement
++
++    IDE : Visual Studio 2022 (v143 outils de build).
++
++    SDK : Windows 11 SDK + Universal C Runtime (nécessaire pour new.h).
++
++    Note Debug : Ne pas lancer VS en mode Admin pour que le débugueur puisse s'attacher au processus.
++
++2. Architecture de la modification (TreeMap.cpp)
++
++Nous avons hacké la fonction CTreeMap::DrawTreeMap pour passer d'un rendu pixel par pixel à une logique de "boîtes".
++
++    Structure DrawState : Ajout de int depth pour suivre la profondeur dans la hiérarchie.
++
++    Cycle de Couleurs : Utilisation d'une palette fixe (Rouge, Orange, Jaune, Vert, Bleu, Violet) basée sur depth % 6.
++
++    Header & Frame : Pour chaque dossier, on dessine une barre de titre (Header) de 18px et on réduit l'espace des enfants (DeflateRect) pour créer un cadre coloré sur les côtés et le bas.
++
++3. Logique d'Agrégation (Le "Génie" de SM14)
++
++Pour éviter la pollution visuelle ("poussière" de petits fichiers) :
++
++    Seuil de zone : Si un objet fait moins de 400 pixels carrés à l'écran, il est agrégé (bloc uni).
++
++    Exception de Taille : Si un fichier/dossier dépasse SIGNIFICANT_SIZE (fixé à 5 Mo), il est toujours affiché, même si la zone écran est petite. Cela permet de voir les gros fichiers cachés dans WinSxS.
++
++    Hit-Test : La fonction FindItemByPoint a été modifiée pour s'arrêter au même niveau que le rendu (on ne peut pas cliquer sur ce qui est caché).
++
++4. État du Code (Points de repère Ctrl+F)
++
++Toutes les modifications sont marquées avec le label : // SM14.
++Les labels ne doivent pas être mis à jour. Ils me servent à CTRL+F : je ne comprends rien au C++.
++
++    Grille : Restaurée via un vecteur gridRects pour n'afficher les traits noirs que sur les blocs suffisamment grands (> 6px).
++
++    Labels : Utilisation de std::wstring et GetName() pour afficher les noms dans les Headers en noir.
++
++5. Prochaines étapes (Backlog)
++
++    Corriger bugs de bordures (certains L sont absents)
++    Certains sous-dossiers ne sont toujours pas affichés (ex : C:\Users\Val\Documents\my games\COH2)
++
++    Réparer les autres options du Treemap (Couleurs par extension, etc.) si besoin.
++
++    Rendre le seuil d'agrégation (0.02 ou 5Mo) configurable via l'interface.
++    Option pour colorier en fonction de l'extension ou de la profondeur
