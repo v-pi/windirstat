@@ -46,6 +46,20 @@ CTreeMap::Options CTreeMap::GetDefaults()
     return DefaultOptions;
 }
 
+std::array<COLORREF, 8> CTreeMap::GetFileTreeColors()
+{
+    return {
+        COptions::FileTreeColor0.Obj(),
+        COptions::FileTreeColor1.Obj(),
+        COptions::FileTreeColor2.Obj(),
+        COptions::FileTreeColor3.Obj(),
+        COptions::FileTreeColor4.Obj(),
+        COptions::FileTreeColor5.Obj(),
+        COptions::FileTreeColor6.Obj(),
+        COptions::FileTreeColor7.Obj()
+    };
+}
+
 CTreeMap::CTreeMap()
 {
     SetOptions(&DefaultOptions);
@@ -157,16 +171,16 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
 
     using DrawState = struct DrawState
     {
-        std::array<double, 4> surface{};
         CRect rc{};
         CItem* item = nullptr;
         int depth = 0;
         double h = 0.0;
         bool asroot = false;
+        std::array<double, 4> surface{};
 
         DrawState(CItem* item_, const CRect rc_, int depth_, const bool asroot_,
             const std::array<double, 4>& surface_, const double h_)
-            : rc(rc_), item(item_), depth(depth_), asroot(asroot_), surface(surface_), h(h_) {
+            : rc(rc_), item(item_), depth(depth_), asroot(asroot_), h(h_), surface(surface_) {
         }
     };
 
@@ -175,11 +189,9 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
     std::vector<double> rows;
     std::vector<int> childrenPerRow;
 
-    struct FolderHeader { CRect rc; std::wstring name; COLORREF color; bool isHeaderBar; };
     std::vector<FolderHeader> headersToDraw;
     std::vector<CRect> gridRects;
     std::vector<CRect> folderInnerRects;
-    struct HeaderSeparatorLine { CPoint p1; CPoint p2; };
     std::vector<HeaderSeparatorLine> headerSeparators;
 
     bool showHeaders = m_options.showHeaders;
@@ -187,16 +199,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
     stack.emplace_back(root, CRect(0, 0, rc.Width(), rc.Height()), 0, true,
         std::array<double, 4>{}, m_options.height);
 
-    const COLORREF fileTreeColors[] = {
-        COptions::FileTreeColor0.Obj(),
-        COptions::FileTreeColor1.Obj(),
-        COptions::FileTreeColor2.Obj(),
-        COptions::FileTreeColor3.Obj(),
-        COptions::FileTreeColor4.Obj(),
-        COptions::FileTreeColor5.Obj(),
-        COptions::FileTreeColor6.Obj(),
-        COptions::FileTreeColor7.Obj()
-    };
+    const auto fileTreeColors = GetFileTreeColors();
     const int dpiY = pdc->GetDeviceCaps(LOGPIXELSY);
     auto ScaleY = [dpiY](int y) { return MulDiv(y, dpiY, 96); };
 
@@ -210,7 +213,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
         if (state.rc.Width() <= 0 || state.rc.Height() <= 0)
         {
             item->TmiSetRectangle(CRect(-1, -1, -1, -1));
-            for (int i = 0; i < item->TmiGetChildCount(); ++i)
+            for (const int i : std::views::iota(0, item->TmiGetChildCount()))
             {
                 item->TmiGetChild(i)->TmiSetRectangle(CRect(-1, -1, -1, -1));
             }
@@ -243,7 +246,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
                 currentColor = fileTreeColors[(state.depth - 1) % 8];
             }
         }
-        double area = (double)state.rc.Width() * state.rc.Height();
+        double area = static_cast<double>(state.rc.Width()) * state.rc.Height();
 
         // The 'gridMinimumArea' option acts as a threshold for aggregation.
         // If set to 0, no aggregation occurs (pure WinDirStat style).
@@ -275,7 +278,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
 
             // Mark children as undrawn to prevent rendering them as separate items.
             if (forceLeaf) {
-                for (int i = 0; i < item->TmiGetChildCount(); ++i)
+                for (const int i : std::views::iota(0, item->TmiGetChildCount()))
                     item->TmiGetChild(i)->TmiSetRectangle(CRect(-1, -1, -1, -1));
             }
             continue;
@@ -534,7 +537,10 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
 
     pdc->SetBkMode(TRANSPARENT);
     CFont font;
-    font.CreatePointFont(85, L"Segoe UI Bold");
+    // Use system GUI font for better compatibility across Windows versions
+    LOGFONT logfont = {};
+    SystemParametersInfo(SPI_GETICONTITLELOGFONT, sizeof(logfont), &logfont, 0);
+    font.CreateFontIndirect(&logfont);
     CSelectObject sofont(pdc, &font);
     CPoint offset = rc.TopLeft();
 
@@ -549,7 +555,10 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
             continue;
         }
 
-        pdc->SetTextColor(RGB(0, 0, 0));
+        // Determine text color based on background brightness
+        const double brightness = CColorSpace::GetColorBrightness(h.color);
+        const COLORREF textColor = brightness > 0.5 ? RGB(0, 0, 0) : RGB(255, 255, 255);
+        pdc->SetTextColor(textColor);
         CRect textRc = h.rc;
         textRc.OffsetRect(offset);
         textRc.DeflateRect(4, 1);
@@ -605,35 +614,47 @@ CItem* CTreeMap::FindItemByPoint(CItem* item, const CPoint point)
         return nullptr;
     }
 
+    ASSERT(rc.PtInRect(point));
+
     const int gridWidth = m_options.grid ? 1 : 0;
 
-    // Return the item if it's a leaf, too small to subdivide, or an aggregated folder
-    // that wasn't subdivided due to the minimum area threshold.
-    if (rc.Width() <= gridWidth || rc.Height() <= gridWidth || item->TmiIsLeaf())
+    const bool isAggregated = !item->TmiIsLeaf()
+        && item->TmiGetChildCount() > 0
+        && item->TmiGetChild(0)->TmiGetRectangle().left == -1;
+
+    if (rc.Width() <= gridWidth || rc.Height() <= gridWidth
+        || item->TmiIsLeaf() || isAggregated)
     {
         return item;
     }
-    else
+
+    ASSERT(item->TmiGetSize() > 0);
+    ASSERT(item->TmiGetChildCount() > 0);
+
+    CItem* ret = nullptr;
+    for (const int i : std::views::iota(0, item->TmiGetChildCount()))
     {
-        CItem* ret = nullptr;
-        for (const int i : std::views::iota(0, item->TmiGetChildCount()))
-        {
-            CItem* child = item->TmiGetChild(i);
-            const CRect& rcChild = child->TmiGetRectangle();
+        CItem* child = item->TmiGetChild(i);
+        const CRect& rcChild = child->TmiGetRectangle();
 
-            // Skip children that were not rendered (uninitialized rectangle),
-            // indicating they were aggregated due to the minimum area threshold.
-            if (rcChild.left == -1 || !rcChild.PtInRect(point))
-                continue;
+        if (rcChild.left == -1 || !rcChild.PtInRect(point))
+            continue;
 
-            ret = FindItemByPoint(child, point);
-            if (ret) break;
-        }
+#ifdef _DEBUG
+        // Only assert coordinate invariants for children that were actually rendered.
+        ASSERT(rcChild.right >= rcChild.left);
+        ASSERT(rcChild.bottom >= rcChild.top);
+        ASSERT(rcChild.left >= rc.left);
+        ASSERT(rcChild.right <= rc.right);
+        ASSERT(rcChild.top >= rc.top);
+        ASSERT(rcChild.bottom <= rc.bottom);
+#endif
 
-        // If no child claimed the point (because they weren't rendered),
-        // return the folder itself.
-        return ret ? ret : item;
+        ret = FindItemByPoint(child, point);
+        if (ret) break;
     }
+
+    return ret ? ret : item;
 }
 
 void CTreeMap::DrawColorPreview(CDC* pdc, const CRect& rc, const COLORREF color, const Options* options)

@@ -196,6 +196,21 @@ public:
 
 protected:
 
+    // Helper structures for header rendering
+    struct FolderHeader
+    {
+        CRect rc;
+        std::wstring name;
+        COLORREF color;
+        bool isHeaderBar;
+    };
+
+    struct HeaderSeparatorLine
+    {
+        CPoint p1;
+        CPoint p2;
+    };
+
     // KDirStat-like squarification
     bool KDirStat_ArrangeChildren(const CItem* parent, std::vector<double>& childWidth, std::vector<double>& rows, std::vector<int>& childrenPerRow) const;
     double KDirStat_CalculateNextRow(const CItem* parent, int nextChild, double width, int& childrenUsed, std::vector<double>& childWidth) const;
@@ -217,6 +232,9 @@ protected:
 
     // Adds a new ridge to surface
     static void AddRidge(const CRect& rc, std::array<double, 4>& surface, double h);
+
+    // File tree colors (depth-based coloring for folders)
+    static std::array<COLORREF, 8> GetFileTreeColors();
 
     // Default tree map options
     static constexpr Options DefaultOptions = {
