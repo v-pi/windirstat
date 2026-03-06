@@ -222,10 +222,14 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
 
         item->TmiSetRectangle(state.rc);
 
-        // Calculate cushion shading geometry. This modifies state.surface,
-        // which is then passed to children. Without this, the surface remains
-        // flat (0,0,0,0) and shading doesn't work.
-        AddRidge(state.rc, state.surface, state.h);
+        // Calculate cushion shading geometry only when cushion shading is active
+        // and the item is not the root (asroot items don't render themselves,
+        // they only pass the surface down to children).
+        // This modifies state.surface, which is then passed to children.
+        if (IsCushionShading() && !state.asroot)
+        {
+            AddRidge(state.rc, state.surface, state.h);
+        }
 
         COLORREF currentColor;
         // Folders always use depth-based coloring (extension colors are only for files)
@@ -528,6 +532,32 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
         }
     }
 
+    // Draw grid lines directly in the bitmap (CPU-efficient, no GDI calls)
+    if (m_options.grid)
+    {
+        const COLORREF gridColor = BGR(0, 0, 0);  // Black grid, encoded as BGR for bitmap
+
+        // Draw outlines for all grid rectangles
+        for (const auto& rect : gridRects)
+        {
+            DrawRectOutline(bitmapBits, rect, gridColor);
+        }
+
+        // Draw header separators and folder inner borders
+        if (showHeaders)
+        {
+            for (const auto& line : headerSeparators)
+            {
+                DrawHLine(bitmapBits, line.p1.y, line.p1.x, line.p2.x, gridColor);
+            }
+
+            for (const auto& iRect : folderInnerRects)
+            {
+                DrawRectOutline(bitmapBits, iRect, gridColor);
+            }
+        }
+    }
+
     // Fill the bitmap with the array data and render
     bmp.CreateBitmap(rc.Width(), rc.Height(), 1, 32, bitmapBits.data());
     {
@@ -565,42 +595,6 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
 
         pdc->DrawText(h.name.c_str(), (int)h.name.length(), &textRc,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    }
-
-    if (m_options.grid)
-    {
-        CPen gridPen(PS_SOLID, 1, RGB(0, 0, 0));
-        CSelectObject sogrid(pdc, &gridPen);
-
-        pdc->MoveTo(m_renderArea.left, m_renderArea.bottom);
-        pdc->LineTo(m_renderArea.left, m_renderArea.top);
-        pdc->LineTo(m_renderArea.right, m_renderArea.top);
-
-        for (const auto& rect : gridRects)
-        {
-            CRect r = rect;
-            r.OffsetRect(offset);
-            pdc->MoveTo(r.left, r.bottom);
-            pdc->LineTo(r.right, r.bottom);
-            pdc->LineTo(r.right, r.top);
-        }
-
-        if (showHeaders)
-        {
-            for (const auto& line : headerSeparators)
-            {
-                pdc->MoveTo(line.p1 + offset);
-                pdc->LineTo(line.p2 + offset);
-            }
-
-            CSelectStockObject sobrush(pdc, NULL_BRUSH);
-            for (const auto& iRect : folderInnerRects)
-            {
-                CRect r = iRect;
-                r.OffsetRect(offset);
-                pdc->Rectangle(&r);
-            }
-        }
     }
 }
 
@@ -942,6 +936,28 @@ void CTreeMap::DrawCushion(std::vector<COLORREF>& bitmap, const CRect& rc, const
         // ... and set!
         bitmap[ix + iy * m_renderArea.Width()] = BGR(blue, green, red);
     }
+}
+
+void CTreeMap::DrawRectOutline(std::vector<COLORREF>& bitmap, const CRect& rc, COLORREF color) const
+{
+    // Top and bottom edges
+    for (int x = rc.left; x < rc.right; x++)
+    {
+        bitmap[rc.top * m_renderArea.Width() + x] = color;
+        bitmap[(rc.bottom - 1) * m_renderArea.Width() + x] = color;
+    }
+    // Left and right edges
+    for (int y = rc.top; y < rc.bottom; y++)
+    {
+        bitmap[y * m_renderArea.Width() + rc.left] = color;
+        bitmap[y * m_renderArea.Width() + rc.right - 1] = color;
+    }
+}
+
+void CTreeMap::DrawHLine(std::vector<COLORREF>& bitmap, int y, int x1, int x2, COLORREF color) const
+{
+    for (int x = x1; x < x2; x++)
+        bitmap[y * m_renderArea.Width() + x] = color;
 }
 
 void CTreeMap::AddRidge(const CRect& rc, std::array<double,4> & surface, const double h)
