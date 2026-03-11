@@ -230,11 +230,9 @@ protected:
     // Draws the surface using FillSolidRect()
     void DrawSolidRect(std::vector<COLORREF>& bitmap, const CRect& rc, COLORREF col, double brightness) const;
 
-    // Draws a rectangle outline directly in the bitmap (CPU-efficient alternative to GDI)
-    void DrawRectOutline(std::vector<COLORREF>& bitmap, const CRect& rc, COLORREF color) const;
-
-    // Draws a horizontal line directly in the bitmap
-    void DrawHLine(std::vector<COLORREF>& bitmap, int y, int x1, int x2, COLORREF color) const;
+    // Draws an L-shape (bottom + right edges only) directly in the bitmap
+    // This matches the original GDI behavior where top/left are covered by neighboring items
+    void DrawLShape(std::vector<COLORREF>& bitmap, const CRect& rc, COLORREF color) const;
 
     // Adds a new ridge to surface
     static void AddRidge(const CRect& rc, std::array<double, 4>& surface, double h);

@@ -191,8 +191,6 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
 
     std::vector<FolderHeader> headersToDraw;
     std::vector<CRect> gridRects;
-    std::vector<CRect> folderInnerRects;
-    std::vector<HeaderSeparatorLine> headerSeparators;
 
     bool showHeaders = m_options.showHeaders;
     std::vector<DrawState> stack;
@@ -232,55 +230,41 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
         }
 
         COLORREF currentColor;
-        // Folders always use depth-based coloring (extension colors are only for files)
         if (item->TmiIsLeaf())
-        {
-            // Use extension-based coloring only for files (original behavior)
             currentColor = item->TmiGetGraphColor();
-        }
         else
-        {
-            // Use depth-based coloring for folders or when DepthColor scheme is selected
-            if (state.depth == 0)
-            {
-                currentColor = RGB(200, 200, 200);
-            }
-            else
-            {
-                currentColor = fileTreeColors[(state.depth - 1) % 8];
-            }
-        }
-        double area = static_cast<double>(state.rc.Width()) * state.rc.Height();
+            currentColor = state.depth == 0 ? DarkMode::WdsSysColor(COLOR_3DFACE) : fileTreeColors[(state.depth - 1) % 8];
 
-        // The 'gridMinimumArea' option acts as a threshold for aggregation.
-        // If set to 0, no aggregation occurs (pure WinDirStat style).
-        // If set to N, any item with an area less than or equal to N pixels
-        // will be rendered as a solid block (SpaceMonger-like aggregation).
+        double area = static_cast<double>(state.rc.Width()) * state.rc.Height();
         bool forceLeaf = (m_options.gridMinimumArea > 0) && (area <= m_options.gridMinimumArea);
+
+        bool useFastGrid = m_options.grid && (m_options.gridMinimumArea == 0);
+        bool useOverlayGrid = m_options.grid && (m_options.gridMinimumArea > 0);
+
+        CRect drawRc = state.rc;
+
+        if (useFastGrid)
+        {
+            drawRc.right--;
+            drawRc.bottom--;
+        }
 
         if (item->TmiIsLeaf() || forceLeaf)
         {
-            if (item->TmiIsLeaf()) {
-                // Render actual file with cushion shading effect.
-                RenderLeaf(bitmapBits, item, state.surface);
-            }
-            else {
-                // Aggregated folder: render as a solid block with depth-based color.
-                DrawSolidRect(bitmapBits, state.rc, currentColor, PALETTE_BRIGHTNESS);
-            }
-
-            // Add to grid rects only if the element exceeds the minimum area threshold.
-            // This prevents drawing borders around very small aggregated items.
-            if (m_options.grid && area > m_options.gridMinimumArea)
+            if (drawRc.Width() > 0 && drawRc.Height() > 0)
             {
-                gridRects.push_back(state.rc);
+                if (item->TmiIsLeaf())
+                    RenderRectangle(bitmapBits, drawRc, state.surface, item->TmiGetGraphColor());
+                else
+                    DrawSolidRect(bitmapBits, drawRc, currentColor, PALETTE_BRIGHTNESS);
             }
 
-            // Queue text label for rendering if item is large enough to be readable.
-            if (state.rc.Width() > 60 && state.rc.Height() > 20)
-                headersToDraw.push_back({ state.rc, item->GetName(), currentColor, false });
+            if (useOverlayGrid && area > m_options.gridMinimumArea)
+                gridRects.push_back(drawRc);
 
-            // Mark children as undrawn to prevent rendering them as separate items.
+            if (drawRc.Width() > 60 && drawRc.Height() > 20)
+                headersToDraw.push_back({ drawRc, item->GetName(), currentColor, false });
+
             if (forceLeaf) {
                 for (const int i : std::views::iota(0, item->TmiGetChildCount()))
                     item->TmiGetChild(i)->TmiSetRectangle(CRect(-1, -1, -1, -1));
@@ -288,42 +272,44 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
             continue;
         }
 
-        // Fill the entire folder rectangle first. This ensures that border areas
-        // created by DeflateRect and margins will have the folder's color rather than
-        // appearing as black gaps.
-        DrawSolidRect(bitmapBits, state.rc, currentColor, PALETTE_BRIGHTNESS);
-
-        // Draw folder outline only if the folder is large enough.
-        if (m_options.grid && area > m_options.gridMinimumArea)
-        {
-            gridRects.push_back(state.rc);
-        }
-
         int headerHeight = ScaleY(18);
+        int borderThickness = 3;
 
-        // Render folder header bar and content if enabled and space allows
-        if (showHeaders && state.rc.Height() > headerHeight + 10 && state.rc.Width() > 30)
+        if (useOverlayGrid && area > m_options.gridMinimumArea)
+            gridRects.push_back(drawRc);
+
+        if (showHeaders && drawRc.Height() > (headerHeight * 2) + borderThickness && drawRc.Width() > borderThickness * 2 + 10)
         {
-            CRect headerRc = state.rc;
-            headerRc.bottom = headerRc.top + headerHeight;
-            // No need to fill the header bar again; the folder rectangle was already filled above.
+            CRect headerRc(drawRc.left, drawRc.top, drawRc.right, drawRc.top + headerHeight);
+            if (headerRc.Width() > 0 && headerRc.Height() > 0)
+                DrawSolidRect(bitmapBits, headerRc, currentColor, PALETTE_BRIGHTNESS);
 
-            // Draw separator line between header and content
-            headerSeparators.push_back({
-                CPoint(state.rc.left, state.rc.top + headerHeight),
-                CPoint(state.rc.right, state.rc.top + headerHeight)
-                });
-
-            // Queue header for later text rendering
             headersToDraw.push_back({ headerRc, item->GetName(), currentColor, true });
 
-            // Reduce the space available for child items to create a colored frame border.
-            // A 3-pixel margin on left, right, and bottom will remain visible in the folder's color.
-            state.rc.top += headerHeight;
-            state.rc.DeflateRect(3, 0, 3, 3);
+            CRect leftRc(drawRc.left, drawRc.top + headerHeight, drawRc.left + borderThickness, drawRc.bottom);
+            if (leftRc.Width() > 0 && leftRc.Height() > 0)
+                DrawSolidRect(bitmapBits, leftRc, currentColor, PALETTE_BRIGHTNESS);
 
-            // Draw inner frame border when headers are enabled.
-            if (m_options.grid) folderInnerRects.push_back(state.rc);
+            CRect rightRc(drawRc.right - borderThickness, drawRc.top + headerHeight, drawRc.right, drawRc.bottom);
+            if (rightRc.Width() > 0 && rightRc.Height() > 0)
+                DrawSolidRect(bitmapBits, rightRc, currentColor, PALETTE_BRIGHTNESS);
+
+            CRect bottomRc(drawRc.left + borderThickness, drawRc.bottom - borderThickness, drawRc.right - borderThickness, drawRc.bottom);
+            if (bottomRc.Width() > 0 && bottomRc.Height() > 0)
+                DrawSolidRect(bitmapBits, bottomRc, currentColor, PALETTE_BRIGHTNESS);
+
+            state.rc.left = drawRc.left + borderThickness;
+            state.rc.top = drawRc.top + headerHeight;
+            state.rc.right = drawRc.right - borderThickness;
+            state.rc.bottom = drawRc.bottom - borderThickness;
+
+            if (m_options.grid) {
+                state.rc.top++;
+                state.rc.left++;
+
+                if (useOverlayGrid)
+                    gridRects.push_back(state.rc);
+            }
         }
 
         if (m_options.style == KDirStatStyle) [[msvc::flatten]]
@@ -532,29 +518,12 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
         }
     }
 
-    // Draw grid lines directly in the bitmap (CPU-efficient, no GDI calls)
-    if (m_options.grid)
+    if (!gridRects.empty())
     {
-        const COLORREF gridColor = BGR(0, 0, 0);  // Black grid, encoded as BGR for bitmap
-
-        // Draw outlines for all grid rectangles
+        constexpr COLORREF gridColor = BGR(0, 0, 0);
         for (const auto& rect : gridRects)
         {
-            DrawRectOutline(bitmapBits, rect, gridColor);
-        }
-
-        // Draw header separators and folder inner borders
-        if (showHeaders)
-        {
-            for (const auto& line : headerSeparators)
-            {
-                DrawHLine(bitmapBits, line.p1.y, line.p1.x, line.p2.x, gridColor);
-            }
-
-            for (const auto& iRect : folderInnerRects)
-            {
-                DrawRectOutline(bitmapBits, iRect, gridColor);
-            }
+            DrawLShape(bitmapBits, rect, gridColor);
         }
     }
 
@@ -693,23 +662,6 @@ void CTreeMap::DrawColorPreview(CDC* pdc, const CRect& rc, const COLORREF color,
         CSelectStockObject sobrush(pdc, NULL_BRUSH);
         pdc->Rectangle(rc);
     }
-}
-
-void CTreeMap::RenderLeaf(std::vector<COLORREF>& bitmap, const CItem* item, const std::array<double, 4>& surface) const
-{
-    CRect rc = item->TmiGetRectangle();
-
-    if (m_options.grid)
-    {
-        rc.top++;
-        rc.left++;
-        if (rc.Width() <= 0 || rc.Height() <= 0)
-        {
-            return;
-        }
-    }
-
-    RenderRectangle(bitmap, rc, surface, item->TmiGetGraphColor());
 }
 
 void CTreeMap::RenderRectangle(std::vector<COLORREF>& bitmap, const CRect& rc, const std::array<double, 4>& surface, DWORD color) const
@@ -938,26 +890,15 @@ void CTreeMap::DrawCushion(std::vector<COLORREF>& bitmap, const CRect& rc, const
     }
 }
 
-void CTreeMap::DrawRectOutline(std::vector<COLORREF>& bitmap, const CRect& rc, COLORREF color) const
+void CTreeMap::DrawLShape(std::vector<COLORREF>& bitmap, const CRect& rc, COLORREF color) const
 {
-    // Top and bottom edges
+    // Bottom edge
     for (int x = rc.left; x < rc.right; x++)
-    {
-        bitmap[rc.top * m_renderArea.Width() + x] = color;
         bitmap[(rc.bottom - 1) * m_renderArea.Width() + x] = color;
-    }
-    // Left and right edges
-    for (int y = rc.top; y < rc.bottom; y++)
-    {
-        bitmap[y * m_renderArea.Width() + rc.left] = color;
-        bitmap[y * m_renderArea.Width() + rc.right - 1] = color;
-    }
-}
 
-void CTreeMap::DrawHLine(std::vector<COLORREF>& bitmap, int y, int x1, int x2, COLORREF color) const
-{
-    for (int x = x1; x < x2; x++)
-        bitmap[y * m_renderArea.Width() + x] = color;
+    // Right edge
+    for (int y = rc.top; y < rc.bottom; y++)
+        bitmap[y * m_renderArea.Width() + rc.right - 1] = color;
 }
 
 void CTreeMap::AddRidge(const CRect& rc, std::array<double,4> & surface, const double h)
