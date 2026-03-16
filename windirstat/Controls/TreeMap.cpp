@@ -176,24 +176,32 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
         double h = 0.0;
         bool asroot = false;
         int depth = 0;
-        std::shared_ptr<bool> gridUnlocked;
+        bool* siblingBorderEnabled = nullptr;
         bool atRightEdge = false;
         bool atBottomEdge = false;
 
         DrawState(CItem* item_, const CRect rc_, const bool asroot_,
             const std::array<double, 4>& surface_, const double h_, int depth_,
-            std::shared_ptr<bool> gridUnlocked_,
+            bool* siblingBorderEnabled_,
             bool atRightEdge_ = false, bool atBottomEdge_ = false)
             : surface(surface_), rc(rc_), item(item_), h(h_), asroot(asroot_),
-            depth(depth_), gridUnlocked(std::move(gridUnlocked_)),
-            atRightEdge(atRightEdge_), atBottomEdge(atBottomEdge_) {
-        }
+            depth(depth_), siblingBorderEnabled(siblingBorderEnabled_),
+            atRightEdge(atRightEdge_), atBottomEdge(atBottomEdge_)
+        {}
     };
 
     // Defined at top level to prevent reallocation
     std::vector<double> childWidth;
     std::vector<double> rows;
     std::vector<int> childrenPerRow;
+
+    std::deque<bool> siblingBorderSlabs;
+    // Shared across siblings in a row so that once any one qualifies for a border,
+    // all of the bigger ones show one — prevents a jarring mix within the same row.
+    const auto newSiblingBorderGroup = [&]() -> bool* {
+        siblingBorderSlabs.push_back(false);
+        return &siblingBorderSlabs.back();
+        };
 
     std::vector<FolderHeader> headersToDraw;
 
@@ -202,13 +210,17 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
         std::array<double, 4>{}, m_options.height, 0, nullptr, true, true);
 
     const auto fileTreeColors = GetFileTreeColors();
+    const int dpiX = pdc->GetDeviceCaps(LOGPIXELSX);
     const int dpiY = pdc->GetDeviceCaps(LOGPIXELSY);
     const int headerHeight = MulDiv(18, dpiY, 96);
+    const int minHeaderWidth = MulDiv(60, dpiX, 96);
+    const int minHeaderHeight = MulDiv(20, dpiY, 96);
+    bool isCushion = IsCushionShading();
 
     // Main loop
     while (!stack.empty())
     {
-        DrawState state = std::move(stack.back());
+        DrawState state = stack.back();
         stack.pop_back();
         CItem* item = state.item;
 
@@ -228,7 +240,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
         // and the item is not the root (asroot items don't render themselves,
         // they only pass the surface down to children).
         // This modifies state.surface, which is then passed to children.
-        if (IsCushionShading() && !state.asroot)
+        if (isCushion && !state.asroot)
         {
             AddRidge(state.rc, state.surface, state.h);
         }
@@ -245,11 +257,11 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
             && state.rc.Height() > (headerHeight * 2) + borderThickness
             && state.rc.Width() > borderThickness * 2 + 10;
         bool applyGridToSelf = m_options.grid && (hasHeader
-            || (state.gridUnlocked && *state.gridUnlocked)
+            || (state.siblingBorderEnabled && *state.siblingBorderEnabled)
             || minDim > m_options.gridMinimumSize);
 
-        if (applyGridToSelf && state.gridUnlocked && !*state.gridUnlocked)
-            *state.gridUnlocked = true;
+        if (applyGridToSelf && state.siblingBorderEnabled && !*state.siblingBorderEnabled)
+            *state.siblingBorderEnabled = true;
 
         CRect drawRc = state.rc;
 
@@ -266,7 +278,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
                 RenderRectangle(bitmapBits, drawRc, state.surface, item->TmiGetGraphColor());
             }
 
-            if (drawRc.Width() > 60 && drawRc.Height() > 20)
+            if (drawRc.Width() > minHeaderWidth && drawRc.Height() > minHeaderHeight)
                 headersToDraw.push_back({ drawRc, item->GetName(), currentColor, false });
             continue;
         }
@@ -297,7 +309,8 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
             state.rc.right = drawRc.right - borderThickness;
             state.rc.bottom = drawRc.bottom - borderThickness;
 
-            if (m_options.grid) {
+            if (m_options.grid)
+            {
                 state.rc.top++;
                 state.rc.left++;
                 state.rc.right--;
@@ -337,7 +350,8 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
                     bottom = horizontalRows ? state.rc.bottom : state.rc.right;
                 }
                 double left = horizontalRows ? state.rc.left : state.rc.top;
-                auto siblingsGridUnlocked = std::make_shared<bool>(false);
+                bool* siblingBorderEnabled = newSiblingBorderGroup();
+
                 for (int i = 0; i < childrenPerRow[row]; i++, c++)
                 {
                     CItem* child = item->TmiGetChild(static_cast<int>(c));
@@ -371,7 +385,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
 
                     // Prepare child state and push onto the stack
                     stack.emplace_back(child, rcChild, false, state.surface,
-                        state.h * m_options.scaleFactor, state.depth + 1, siblingsGridUnlocked,
+                        state.h * m_options.scaleFactor, state.depth + 1, siblingBorderEnabled,
                         rcChild.right >= state.rc.right,
                         rcChild.bottom >= state.rc.bottom);
 
@@ -454,7 +468,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
 
                 // Distribute the children in the row
                 double fBegin = horizontal ? rcRow.top : rcRow.left;
-                auto siblingsGridUnlocked = std::make_shared<bool>(false);
+                bool* siblingBorderEnabled = newSiblingBorderGroup();
 
                 for (const int i : std::views::iota(rowBegin, rowEnd))
                 {
@@ -491,7 +505,7 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
                     if (childSize > 0)
                     {
                         stack.emplace_back(item->TmiGetChild(i), rcChild, false, state.surface,
-                            state.h * m_options.scaleFactor, state.depth + 1, siblingsGridUnlocked,
+                            state.h * m_options.scaleFactor, state.depth + 1, siblingBorderEnabled,
                             rcChild.right >= state.rc.right,
                             rcChild.bottom >= state.rc.bottom);
                     }
@@ -542,24 +556,25 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
 
     // Render text labels (only in flat mode, not when cushion shading is enabled)
     // Text is shown for headers and large items when cushion shading is disabled.
-    bool isCushion = IsCushionShading();
 
-    for (auto& h : headersToDraw) {
+    for (auto& header : headersToDraw)
+    {
         // Skip text rendering for file bodies when cushion shading is active.
         // Only header bars will show text.
-        if (isCushion && !h.isHeaderBar) {
+        if (isCushion && !header.isFolderHeader)
+        {
             continue;
         }
 
         // Determine text color based on background brightness
-        const double brightness = CColorSpace::GetColorBrightness(h.color);
+        const double brightness = CColorSpace::GetColorBrightness(header.color);
         const COLORREF textColor = brightness > 0.5 ? RGB(0, 0, 0) : RGB(255, 255, 255);
         pdc->SetTextColor(textColor);
-        CRect textRc = h.rc;
+        CRect textRc = header.rc;
         textRc.OffsetRect(offset);
         textRc.DeflateRect(4, 1);
 
-        pdc->DrawText(h.name.c_str(), (int)h.name.length(), &textRc,
+        pdc->DrawText(header.name.c_str(), static_cast<int>(header.name.length()), &textRc,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 }
@@ -885,17 +900,6 @@ void CTreeMap::DrawCushion(std::vector<COLORREF>& bitmap, const CRect& rc, const
         // ... and set!
         bitmap[ix + iy * m_renderArea.Width()] = BGR(blue, green, red);
     }
-}
-
-void CTreeMap::DrawLShape(std::vector<COLORREF>& bitmap, const CRect& rc, COLORREF color) const
-{
-    // Bottom edge
-    for (int x = rc.left; x < rc.right; x++)
-        bitmap[(rc.bottom - 1) * m_renderArea.Width() + x] = color;
-
-    // Right edge
-    for (int y = rc.top; y < rc.bottom; y++)
-        bitmap[y * m_renderArea.Width() + rc.right - 1] = color;
 }
 
 void CTreeMap::AddRidge(const CRect& rc, std::array<double,4> & surface, const double h)

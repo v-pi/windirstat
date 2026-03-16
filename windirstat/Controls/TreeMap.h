@@ -202,7 +202,8 @@ protected:
         CRect rc;
         std::wstring name;
         COLORREF color;
-        bool isHeaderBar;
+        // Folder header or leaf body
+        bool isFolderHeader;
     };
 
     // KDirStat-like squarification
@@ -220,10 +221,6 @@ protected:
 
     // Draws the surface using FillSolidRect()
     void DrawSolidRect(std::vector<COLORREF>& bitmap, const CRect& rc, COLORREF col, double brightness) const;
-
-    // Draws an L-shape (bottom + right edges only) directly in the bitmap
-    // This matches the original GDI behavior where top/left are covered by neighboring items
-    void DrawLShape(std::vector<COLORREF>& bitmap, const CRect& rc, COLORREF color) const;
 
     // Adds a new ridge to surface
     static void AddRidge(const CRect& rc, std::array<double, 4>& surface, double h);
