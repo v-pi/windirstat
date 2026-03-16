@@ -251,38 +251,43 @@ void CTreeMap::DrawTreeMap(CDC* pdc, CRect rc, CItem* root, const Options* optio
         else
             currentColor = state.depth == 0 ? DarkMode::WdsSysColor(COLOR_3DFACE) : fileTreeColors[(state.depth - 1) % 8];
 
-        int minDim = std::min<int>(state.rc.Width(), state.rc.Height());
-        int borderThickness = 3;
-        bool hasHeader = m_options.showHeaders
-            && state.rc.Height() > (headerHeight * 2) + borderThickness
-            && state.rc.Width() > borderThickness * 2 + 10;
-        bool applyGridToSelf = m_options.grid && (hasHeader
-            || (state.siblingBorderEnabled && *state.siblingBorderEnabled)
-            || minDim > m_options.gridMinimumSize);
-
-        if (applyGridToSelf && state.siblingBorderEnabled && !*state.siblingBorderEnabled)
-            *state.siblingBorderEnabled = true;
+        const int minDim = std::min<int>(state.rc.Width(), state.rc.Height());
+        const bool meetsGridThreshold = m_options.grid
+            && ((state.siblingBorderEnabled && *state.siblingBorderEnabled)
+                || minDim > m_options.gridMinimumSize);
 
         CRect drawRc = state.rc;
 
+        if (item->TmiIsLeaf())
+        {
+            if (meetsGridThreshold)
+            {
+                if (!state.atRightEdge)  drawRc.right--;
+                if (!state.atBottomEdge) drawRc.bottom--;
+            }
+
+            if (drawRc.Width() > 0 && drawRc.Height() > 0)
+                RenderRectangle(bitmapBits, drawRc, state.surface, item->TmiGetGraphColor());
+
+            if (drawRc.Width() > 60 && drawRc.Height() > 20)
+                headersToDraw.push_back({ drawRc, item->GetName(), item->TmiGetGraphColor(), false });
+            continue;
+        }
+
+        constexpr int borderThickness = 3;
+        const bool hasHeader = m_options.showHeaders
+            && state.rc.Height() > (headerHeight * 2) + borderThickness
+            && state.rc.Width() > borderThickness * 2 + 10;
+
+        const bool applyGridToSelf = meetsGridThreshold || hasHeader;
         if (applyGridToSelf)
         {
             if (!state.atRightEdge)  drawRc.right--;
             if (!state.atBottomEdge) drawRc.bottom--;
         }
 
-        if (item->TmiIsLeaf())
-        {
-            if (drawRc.Width() > 0 && drawRc.Height() > 0)
-            {
-                RenderRectangle(bitmapBits, drawRc, state.surface, item->TmiGetGraphColor());
-            }
-
-            if (drawRc.Width() > minHeaderWidth && drawRc.Height() > minHeaderHeight)
-                headersToDraw.push_back({ drawRc, item->GetName(), currentColor, false });
-            continue;
-        }
-
+        if (applyGridToSelf && state.siblingBorderEnabled && !*state.siblingBorderEnabled)
+            *state.siblingBorderEnabled = true;
 
         if (hasHeader)
         {
