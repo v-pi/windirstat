@@ -60,6 +60,8 @@ protected:
     void HighlightSelectedItem(CDC* pdc, const CItem* item, bool single) const;
     void RenderHighlightRectangle(CDC* pdc, CRect& rc) const;
 
+    CItem* ResolveItemAtPoint(CPoint point, bool isScreenCoords = false);
+
     static constexpr int ZoomFrameWidth = 4;
 
     std::wstring m_paneTextOverride;  // Populated with the last hovered item for a period of time
@@ -78,5 +80,6 @@ protected:
     afx_msg void OnSetFocus(CWnd* pOldWnd);
     afx_msg void OnContextMenu(CWnd* pWnd, CPoint point);
     afx_msg void OnMouseMove(UINT nFlags, CPoint point);
+    afx_msg BOOL OnMouseWheel(UINT nFlags, short zDelta, CPoint pt);
 };
 
